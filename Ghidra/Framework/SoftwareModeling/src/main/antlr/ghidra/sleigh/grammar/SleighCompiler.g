@@ -1025,7 +1025,7 @@ code_block[Location startingPoint] returns [ConstructTpl rtl]
 	}
 	scope Block;
 	@init {
-		$Block::ct = new ConstructTpl(startingPoint);
+		$Block::ct = pcode.enterSection(startingPoint);
 		$code_block::stmtLocation = new Location("<internal error populating statement location>", 0);
 	}
 	@after {
@@ -1091,7 +1091,7 @@ statement
 					pcode.recordNop(s.first);
 			}
 			$semantic::containsMultipleSections = true;
-			$Block::ct = new ConstructTpl(s.first);
+			$Block::ct = pcode.enterSection(s.first);
 		}
 	;
 

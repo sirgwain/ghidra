@@ -37,6 +37,13 @@ import ghidra.util.task.TaskMonitor;
 
 public class Objc2TypeMetadata extends AbstractObjcTypeMetadata {
 
+	private Set<Address> refs = new HashSet<>();
+	private List<Objc2ImageInfo> imageInfos = new ArrayList<>();
+	private List<Objc2Category> categories = new ArrayList<>();
+	private List<Objc2Class> classes = new ArrayList<>();
+	private List<Objc2Protocol> protocols = new ArrayList<>();
+	private List<Objc2MessageReference> messageRefs = new ArrayList<>();
+
 	/**
 	 * Creates a new {@link Objc2TypeMetadata}
 	 * 
@@ -50,6 +57,48 @@ public class Objc2TypeMetadata extends AbstractObjcTypeMetadata {
 			throws IOException, CancelledException {
 		super(new ObjcState(program, Objc2Constants.CATEGORY_PATH), program, monitor, log);
 		parse();
+	}
+
+	/**
+	 * {@return the {@link Set} of {@link Address refs}}
+	 */
+	public Set<Address> getRefs() {
+		return refs;
+	}
+
+	/**
+	 * {@return the {@link List} of {@link Objc2ImageInfo image info entries}}
+	 */
+	public List<Objc2ImageInfo> getImageInfos() {
+		return imageInfos;
+	}
+
+	/**
+	 * {@return the {@link List} of {@link Objc2Category categories}}
+	 */
+	public List<Objc2Category> getCategories() {
+		return categories;
+	}
+
+	/**
+	 * {@return the {@link List} of {@link Objc2Class classes}}
+	 */
+	public List<Objc2Class> getClasses() {
+		return classes;
+	}
+
+	/**
+	 * {@return the {@link List} of {@link Objc2Protocol protocols}}
+	 */
+	public List<Objc2Protocol> getProtocols() {
+		return protocols;
+	}
+
+	/**
+	 * {@return the {@link List} of {@link Objc2MessageReference message references}}
+	 */
+	public List<Objc2MessageReference> getMessageRefs() {
+		return messageRefs;
 	}
 
 	/**
@@ -83,13 +132,6 @@ public class Objc2TypeMetadata extends AbstractObjcTypeMetadata {
 			parseMessageReferences(Objc2Constants.OBJC2_MESSAGE_REFS, reader, objcBlockMap);
 		}
 	}
-
-	private Set<Address> refs = new HashSet<>();
-	private List<Objc2ImageInfo> imageInfos = new ArrayList<>();
-	private List<Objc2Category> categories = new ArrayList<>();
-	private List<Objc2Class> classes = new ArrayList<>();
-	private List<Objc2Protocol> protocols = new ArrayList<>();
-	private List<Objc2MessageReference> messageRefs = new ArrayList<>();
 
 	private void parseRefs(String section, Set<Address> set,
 			Map<String, List<MemoryBlock>> objcBlockMap) throws CancelledException {
@@ -248,7 +290,7 @@ public class Objc2TypeMetadata extends AbstractObjcTypeMetadata {
 				imageInfo.applyTo(program.getGlobalNamespace(), monitor);
 			}
 			catch (Exception e) {
-				log("Failed to markup image info: " + imageInfo);
+				log("Failed to markup: " + imageInfo);
 			}
 		}
 		for (Objc2Category category : categories) {
@@ -256,7 +298,7 @@ public class Objc2TypeMetadata extends AbstractObjcTypeMetadata {
 				category.applyTo(program.getGlobalNamespace(), monitor);
 			}
 			catch (Exception e) {
-				log("Failed to markup category: " + category);
+				log("Failed to markup: " + category);
 			}
 		}
 		for (Objc2Class cls : classes) {
@@ -264,7 +306,7 @@ public class Objc2TypeMetadata extends AbstractObjcTypeMetadata {
 				cls.applyTo(program.getGlobalNamespace(), monitor);
 			}
 			catch (Exception e) {
-				log("Failed to markup class: " + cls);
+				log("Failed to markup: " + cls);
 			}
 		}
 		for (Objc2Protocol protocol : protocols) {
@@ -274,7 +316,7 @@ public class Objc2TypeMetadata extends AbstractObjcTypeMetadata {
 				protocol.applyTo(namespace, monitor);
 			}
 			catch (Exception e) {
-				log("Failed to markup protocol: " + protocol);
+				log("Failed to markup: " + protocol);
 			}
 		}
 		for (Objc2MessageReference messageRef : messageRefs) {
@@ -282,7 +324,7 @@ public class Objc2TypeMetadata extends AbstractObjcTypeMetadata {
 				messageRef.applyTo(program.getGlobalNamespace(), monitor);
 			}
 			catch (Exception e) {
-				log("Failed to markup message reference: " + messageRef);
+				log("Failed to markup: " + messageRef);
 			}
 		}
 
