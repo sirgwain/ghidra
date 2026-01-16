@@ -18,6 +18,8 @@
       ]]></body>
     </pcode>
     <constresolve>
+      <!-- Prefer CS for code-segment immediates, but fall back to DS for data immediates -->
+      <register name="CS"/>
       <register name="DS"/>
     </constresolve>
   </segmentop>

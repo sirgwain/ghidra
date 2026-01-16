@@ -1452,14 +1452,59 @@ Address SegmentedResolver::resolve(uintb val,int4 sz,const Address &point,uintb 
   // In this case the address offset is not fully specified
   // we check if the rest is stored in a context variable
   // (as with near pointers)
-    if (segop->getResolve().space != (AddrSpace *)0) {
-      uintb base = glb->context->getTrackedValue(segop->getResolve(),point);
-      fullEncoding = (base << 8 * innersz) + (val & calc_mask(innersz));
-      vector<uintb> seginput;
-      seginput.push_back(base);
-      seginput.push_back(val);
-      val = segop->execute(seginput);
-      return Address(spc,AddrSpace::addressToByte(val,spc->getWordSize()));
+    const vector<VarnodeData> &rlist = segop->getResolveList();
+    if (!rlist.empty()) {
+      // Try each candidate base register in order and prefer the first candidate
+      // that resolves to a known symbol/label at the computed address.
+      Address bestAddr;
+      uintb bestFull = 0;
+      bool haveBest = false;
+
+      for (int4 i = 0; i < (int4)rlist.size(); ++i) {
+        const VarnodeData &cr = rlist[i];
+        if (cr.space == (AddrSpace *)0) {
+          continue;
+        }
+        uintb base = glb->context->getTrackedValue(cr, point);
+        uintb full = (base << 8 * innersz) + (val & calc_mask(innersz));
+
+        vector<uintb> seginput;
+        seginput.push_back(base);
+        seginput.push_back(val);
+        uintb phys = segop->execute(seginput);
+        Address candAddr(spc, AddrSpace::addressToByte(phys, spc->getWordSize()));
+
+        // Remember the first candidate as a fallback in case no "good" symbol is found.
+        if (!haveBest) {
+          bestAddr = candAddr;
+          bestFull = full;
+          haveBest = true;
+        }
+
+        // "Good" heuristic: the candidate address already has a symbol/label/function.
+        // This matches the symbol-gated behavior that avoids spurious pointer resolutions.
+        if (glb->symboltab != (Database *)0) {
+          // The symbol query APIs live on Scope, not Database.
+          // Map the candidate to the appropriate scope, falling back to global.
+          Scope *gscope = glb->symboltab->getGlobalScope();
+          Scope *scope = glb->symboltab->mapScope(gscope, candAddr, point);
+          if (scope == (Scope *)0) {
+            scope = gscope;
+          }
+
+          if (scope->findFunction(candAddr) != (Funcdata *)0 ||
+              scope->findCodeLabel(candAddr) != (LabSymbol *)0 ||
+              scope->findAddr(candAddr, point) != (SymbolEntry *)0) {
+            fullEncoding = full;
+            return candAddr;
+          }
+        }
+      }
+
+      if (haveBest) {
+        fullEncoding = bestFull;
+        return bestAddr;
+      }
     }
   }
   else { // For anything else, consider it a "far" pointer

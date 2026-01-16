@@ -267,14 +267,19 @@ class SegmentOp : public TermPatternOp {
   int4 baseinsize;		///< The size in bytes of the \e base or \e segment value
   int4 innerinsize;		///< The size in bytes of the \e near pointer value
   bool supportsfarpointer;	///< Is \b true if the joined pair base:near acts as a \b far pointer
-  VarnodeData constresolve;	///< How to resolve constant near pointers
+  /// Ordered list of context registers/varnodes that may supply the base/segment
+  /// for resolving constant near pointers (e.g. CS then DS).
+  vector<VarnodeData> constresolveList;
+  VarnodeData constresolveDefault; ///< Invalid sentinel returned when no resolver is configured
 public:
   SegmentOp(const string &nm,Architecture *g,int4 ind);		///< Constructor
   AddrSpace *getSpace(void) const { return spc; }		///< Get the address space being pointed to
   bool hasFarPointerSupport(void) const { return supportsfarpointer; }	///< Return \b true, if \b this op supports far pointers
   int4 getBaseSize(void) const { return baseinsize; }		///< Get size in bytes of the base/segment value
   int4 getInnerSize(void) const { return innerinsize; }		///< Get size in bytes of the near value
-  const VarnodeData &getResolve(void) const { return constresolve; }	///< Get the default register for resolving indirect segments
+  /// Back-compat: return the first (preferred) resolver entry or an invalid VarnodeData.
+  const VarnodeData &getResolve(void) const { return constresolveList.empty() ? constresolveDefault : constresolveList[0]; }	///< Get the default register for resolving indirect segments
+  const vector<VarnodeData> &getResolveList(void) const { return constresolveList; }	///< Get all candidate resolvers
   virtual int4 getNumVariableTerms(void) const { if (baseinsize!=0) return 2; return 1; }
   virtual bool unify(Funcdata &data,PcodeOp *op,vector<Varnode *> &bindlist) const;
   virtual uintb execute(const vector<uintb> &input) const;

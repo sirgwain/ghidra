@@ -110,20 +110,50 @@ public class SegmentedAddressHelper {
 			
 			if (segmentPayload instanceof InjectPayloadSegment) {
 				InjectPayloadSegment segPayload = (InjectPayloadSegment) segmentPayload;
-				
-				// Access the constresolve register information via reflection
-				// (Since the fields are private, we need to use reflection)
-				java.lang.reflect.Field spaceField = InjectPayloadSegment.class.getDeclaredField("constResolveSpace");
-				java.lang.reflect.Field offsetField = InjectPayloadSegment.class.getDeclaredField("constResolveOffset");
-				java.lang.reflect.Field sizeField = InjectPayloadSegment.class.getDeclaredField("constResolveSize");
-				
-				spaceField.setAccessible(true);
-				offsetField.setAccessible(true);
-				sizeField.setAccessible(true);
-				
-				AddressSpace constResolveSpace = (AddressSpace) spaceField.get(segPayload);
-				long constResolveOffset = offsetField.getLong(segPayload);
-				int constResolveSize = sizeField.getInt(segPayload);
+
+					// Access constresolve register information via reflection.
+					// Newer builds may have multiple entries (e.g. CS then DS).  We treat the
+					// first entry as the default for UI helpers.
+					AddressSpace constResolveSpace = null;
+					long constResolveOffset = 0;
+					int constResolveSize = 0;
+
+					try {
+						java.lang.reflect.Field spacesField = InjectPayloadSegment.class.getDeclaredField("constResolveSpaces");
+						java.lang.reflect.Field offsetsField = InjectPayloadSegment.class.getDeclaredField("constResolveOffsets");
+						java.lang.reflect.Field sizesField = InjectPayloadSegment.class.getDeclaredField("constResolveSizes");
+						spacesField.setAccessible(true);
+						offsetsField.setAccessible(true);
+						sizesField.setAccessible(true);
+						Object oSpaces = spacesField.get(segPayload);
+						Object oOffsets = offsetsField.get(segPayload);
+						Object oSizes = sizesField.get(segPayload);
+						if (oSpaces instanceof java.util.List && oOffsets instanceof java.util.List && oSizes instanceof java.util.List) {
+							java.util.List<?> lSpaces = (java.util.List<?>) oSpaces;
+							java.util.List<?> lOffsets = (java.util.List<?>) oOffsets;
+							java.util.List<?> lSizes = (java.util.List<?>) oSizes;
+							if (!lSpaces.isEmpty() && lSpaces.get(0) instanceof AddressSpace) {
+								constResolveSpace = (AddressSpace) lSpaces.get(0);
+								constResolveOffset = ((Number) lOffsets.get(0)).longValue();
+								constResolveSize = ((Number) lSizes.get(0)).intValue();
+							}
+						}
+					}
+					catch (NoSuchFieldException nsfe) {
+						// Fall through to legacy single fields
+					}
+
+					if (constResolveSpace == null) {
+						java.lang.reflect.Field spaceField = InjectPayloadSegment.class.getDeclaredField("constResolveSpace");
+						java.lang.reflect.Field offsetField = InjectPayloadSegment.class.getDeclaredField("constResolveOffset");
+						java.lang.reflect.Field sizeField = InjectPayloadSegment.class.getDeclaredField("constResolveSize");
+						spaceField.setAccessible(true);
+						offsetField.setAccessible(true);
+						sizeField.setAccessible(true);
+						constResolveSpace = (AddressSpace) spaceField.get(segPayload);
+						constResolveOffset = offsetField.getLong(segPayload);
+						constResolveSize = sizeField.getInt(segPayload);
+					}
 				
 				if (constResolveSpace != null) {
 					// Find the register at this address

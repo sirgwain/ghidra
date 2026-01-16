@@ -1541,6 +1541,69 @@ bool PrintC::printCharacterConstant(ostream &s,const Address &addr,Datatype *cha
   const vector<uint1> &buffer(manager->getStringData(addr, charType, isTrunc));
   if (buffer.empty())
     return false;
+
+  // If there is a non-string style symbol at this address, prefer printing the symbol
+  // over emitting a C string literal.  This helps with lookup tables that happen to be
+  // composed of printable ASCII (common in compressed-message and encoding tables).
+  //
+  // Ghidra typically labels actual string literals with a prefix like "s_" (or "str_").
+  // If the symbol doesn't look like a string label, treat the bytes as data so the
+  // printer can fall back to an address/symbol-based representation.
+  if (!charType->isOpaqueString() && glb->symboltab != (Database *)0) {
+    Scope *gscope = glb->symboltab->getGlobalScope();
+    Scope *scope = glb->symboltab->mapScope(gscope, addr, addr);
+    if (scope == (Scope *)0) {
+      scope = gscope;
+    }
+    SymbolEntry *entry = scope->findAddr(addr, addr);
+    if (entry != (SymbolEntry *)0) {
+      Symbol *sym = entry->getSymbol();
+      if (sym != (Symbol *)0) {
+        const string &nm = sym->getName();
+        if (!(nm.size() >= 2 && nm[0] == 's' && nm[1] == '_') &&
+            !(nm.size() >= 4 && nm[0] == 's' && nm[1] == 't' && nm[2] == 'r' && nm[3] == '_')) {
+          return false;
+        }
+      }
+    }
+  }
+
+  // Heuristic: Only emit a C string literal if the data *looks* like text.
+  // Win16 games (and other legacy binaries) often keep byte lookup tables in the code segment.
+  // If the table gets mis-typed as a "string", emitting a giant escaped literal is noisy and
+  // makes indexing expressions hard to read.  Bail out here so the printer falls back to a
+  // symbol/address-based representation.
+  {
+    int4 printable = 0;
+    int4 total = (int4)buffer.size();
+    bool hasTerminator = false;
+    for (int4 i = 0; i < total; ++i) {
+      uint1 c = buffer[i];
+      if (c == 0) {
+        // Terminator is fine and does not count against "textiness".
+        hasTerminator = true;
+        continue;
+      }
+      if ((c >= 0x20 && c <= 0x7e) || c == '\t' || c == '\n' || c == '\r') {
+        printable += 1;
+      }
+    }
+    // Require a majority of printable characters for non-opaque strings.
+    // (Opaque strings are used for encodings where "printable" isn't meaningful.)
+    if (!charType->isOpaqueString()) {
+      // Require an actual terminator in the recovered bytes.  Lookup tables in the code
+      // segment are often byte arrays with no NUL terminator.  Emitting these as a C
+      // string literal is misleading, especially when the data is indexed.
+      if (!hasTerminator) {
+        return false;
+      }
+      // If more than ~30% of the bytes are control/non-printable, treat it as non-string data.
+      // Also require at least one printable character to avoid treating pure control tables as strings.
+      if (printable == 0 || (printable * 100) < (total * 70)) {
+        return false;
+      }
+    }
+  }
   if (doEmitWideCharPrefix() && charType->getSize() > 1 && !charType->isOpaqueString())
     s << 'L';			// Print symbol indicating wide character
   s << '"';
@@ -1786,6 +1849,29 @@ void PrintC::pushConstant(uintb val,const Datatype *ct,tagtype tag,
     else if (subtype->getMetatype()==TYPE_CODE) {
       if (pushPtrCodeConstant(val,(const TypePointer *)ct,vn,op))
 	return;
+    }
+
+    // If the pointer doesn't look like a printable string or function pointer,
+    // still try to render it as a named symbol (e.g. CS: byte tables) instead
+    // of a raw numeric address.
+    {
+      AddrSpace *spc = glb->getDefaultDataSpace();
+      uintb fullEncoding = 0;
+      Address point;
+      if (op != (const PcodeOp *)0)
+        point = op->getAddr();
+      Address addr = glb->resolveConstant(spc,val,ct->getSize(),point,fullEncoding);
+      if (!addr.isInvalid() && glb->symboltab != (Database *)0) {
+        Scope *gscope = glb->symboltab->getGlobalScope();
+        Scope *scope = glb->symboltab->mapScope(gscope,addr,point);
+        if (scope == (Scope *)0)
+          scope = gscope;
+        SymbolEntry *entry = scope->findAddr(addr, point);
+        if (entry != (SymbolEntry *)0) {
+          pushSymbol(entry->getSymbol(), vn, op);
+          return;
+        }
+      }
     }
     break;
   case TYPE_FLOAT:

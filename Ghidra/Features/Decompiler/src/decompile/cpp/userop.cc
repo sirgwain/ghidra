@@ -183,7 +183,10 @@ int4 VolatileWriteOp::extractAnnotationSize(const Varnode *vn,const PcodeOp *op)
 SegmentOp::SegmentOp(const string &nm,Architecture *g,int4 ind)
   : TermPatternOp(nm,g,segment,ind)
 {
-  constresolve.space = (AddrSpace *)0;
+  constresolveList.clear();
+  constresolveDefault.space = (AddrSpace *)0;
+  constresolveDefault.offset = 0;
+  constresolveDefault.size = 0;
 }
 
 bool SegmentOp::unify(Funcdata &data,PcodeOp *op,
@@ -256,13 +259,15 @@ void SegmentOp::decode(Decoder &decoder)
     uint4 subId = decoder.peekElement();
     if (subId == 0) break;
     if (subId==ELEM_CONSTRESOLVE) {
-      int4 sz;
       decoder.openElement();
-      if (decoder.peekElement() != 0) {
+      while (decoder.peekElement() != 0) {
+	int4 sz;
 	Address addr = Address::decode(decoder,sz);
-	constresolve.space = addr.getSpace();
-	constresolve.offset = addr.getOffset();
-	constresolve.size = sz;
+	VarnodeData ent;
+	ent.space = addr.getSpace();
+	ent.offset = addr.getOffset();
+	ent.size = sz;
+	constresolveList.push_back(ent);
       }
       decoder.closeElement(subId);
     }

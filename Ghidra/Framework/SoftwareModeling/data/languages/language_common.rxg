@@ -257,7 +257,14 @@
       </element>
       <optional>
         <element name="constresolve">
-          <ref name="varnode_tags_type"/>
+          <!--
+            Historically <constresolve> contained exactly one <register> or <varnode>.
+            Allow multiple entries so segmented languages can provide an ordered list
+            of candidate context registers (e.g. CS then DS).
+          -->
+          <oneOrMore>
+            <ref name="varnode_tags_type"/>
+          </oneOrMore>
         </element>
       </optional>
     </element>

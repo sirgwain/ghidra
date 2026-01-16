@@ -32,9 +32,16 @@ public class InjectPayloadSegment extends InjectPayloadSleigh {
 
 	private AddressSpace space;
 	private boolean supportsFarPointer;
+	// Back-compat: the first constresolve entry is also stored in these original
+	// single fields. Some helper code uses reflection to read these.
 	private AddressSpace constResolveSpace;
 	private long constResolveOffset;
 	private int constResolveSize;
+
+	// New: allow multiple <constresolve> entries (e.g. CS then DS)
+	private java.util.ArrayList<AddressSpace> constResolveSpaces;
+	private java.util.ArrayList<Long> constResolveOffsets;
+	private java.util.ArrayList<Integer> constResolveSizes;
 
 	public InjectPayloadSegment(String source) {
 		super(source);
@@ -44,6 +51,9 @@ public class InjectPayloadSegment extends InjectPayloadSleigh {
 		constResolveSpace = null;
 		constResolveOffset = 0;
 		constResolveSize = 0;
+		constResolveSpaces = new java.util.ArrayList<>();
+		constResolveOffsets = new java.util.ArrayList<>();
+		constResolveSizes = new java.util.ArrayList<>();
 	}
 
 	@Override
@@ -59,7 +69,20 @@ public class InjectPayloadSegment extends InjectPayloadSleigh {
 			encoder.writeBool(ATTRIB_FARPOINTER, supportsFarPointer);
 		}
 		super.encode(encoder);
-		if (constResolveSpace != null) {
+		// Encode constresolve information if present. Prefer the list if it has entries.
+		if (!constResolveSpaces.isEmpty()) {
+			encoder.openElement(ELEM_CONSTRESOLVE);
+			for (int i = 0; i < constResolveSpaces.size(); i++) {
+				encoder.openElement(ELEM_VARNODE);
+				encoder.writeSpace(ATTRIB_SPACE, constResolveSpaces.get(i));
+				encoder.writeUnsignedInteger(ATTRIB_OFFSET, constResolveOffsets.get(i));
+				encoder.writeSignedInteger(ATTRIB_SIZE, constResolveSizes.get(i));
+				encoder.closeElement(ELEM_VARNODE);
+			}
+			encoder.closeElement(ELEM_CONSTRESOLVE);
+		}
+		else if (constResolveSpace != null) {
+			// Legacy single-entry encoding
 			encoder.openElement(ELEM_CONSTRESOLVE);
 			encoder.openElement(ELEM_VARNODE);
 			encoder.writeSpace(ATTRIB_SPACE, constResolveSpace);
@@ -95,14 +118,57 @@ public class InjectPayloadSegment extends InjectPayloadSleigh {
 		}
 		if (parser.peek().isStart()) {
 			XmlElement subel = parser.start("constresolve");
-			XmlElement subsubel = parser.start();
-			AddressXML addrSize = AddressXML.restoreXml(subsubel, language);
-			addrSize.getFirstAddress();		// Fail fast. Throws AddressOutOfBoundsException if offset is invalid
-			constResolveSpace = addrSize.getAddressSpace();
-			constResolveOffset = addrSize.getOffset();
-			constResolveSize = (int) addrSize.getSize();
-			parser.end(subsubel);
+			// Accept multiple children:
+			//   <register name="CS"/>
+			//   <register name="DS"/>
+			// or legacy:
+			//   <varnode space="register" offset="..." size="..."/>
+			constResolveSpaces.clear();
+			constResolveOffsets.clear();
+			constResolveSizes.clear();
+			while (parser.peek().isStart()) {
+				XmlElement child = parser.start();
+				String childName = child.getName();
+				if (childName.equals("register")) {
+					String regName = child.getAttribute("name");
+					if (regName == null) {
+						throw new XmlParseException("Missing 'name' attribute for <register> in <constresolve>");
+					}
+					Register reg = language.getRegister(regName);
+					if (reg == null) {
+						throw new XmlParseException("Unknown register in <constresolve>: " + regName);
+					}
+					AddressSpace rspace = reg.getAddress().getAddressSpace();
+					long roff = reg.getAddress().getOffset();
+					int rsize = reg.getMinimumByteSize();
+					constResolveSpaces.add(rspace);
+					constResolveOffsets.add(roff);
+					constResolveSizes.add(rsize);
+					parser.end(child);
+				}
+				else {
+					// Legacy varnode encoding
+					AddressXML addrSize = AddressXML.restoreXml(child, language);
+					addrSize.getFirstAddress();
+					constResolveSpaces.add(addrSize.getAddressSpace());
+					constResolveOffsets.add(addrSize.getOffset());
+					constResolveSizes.add((int) addrSize.getSize());
+					parser.end(child);
+				}
+			}
 			parser.end(subel);
+
+			// Populate the legacy single fields with the first entry (if any)
+			if (!constResolveSpaces.isEmpty()) {
+				constResolveSpace = constResolveSpaces.get(0);
+				constResolveOffset = constResolveOffsets.get(0);
+				constResolveSize = constResolveSizes.get(0);
+			}
+			else {
+				constResolveSpace = null;
+				constResolveOffset = 0;
+				constResolveSize = 0;
+			}
 		}
 		parser.end(el);
 	}
@@ -113,14 +179,20 @@ public class InjectPayloadSegment extends InjectPayloadSleigh {
 			return false;
 		}
 		InjectPayloadSegment op2 = (InjectPayloadSegment) obj;
-		if (constResolveOffset != op2.constResolveOffset) {
+		// Compare the constresolve lists if present
+		if (this.constResolveSpaces.size() != op2.constResolveSpaces.size()) {
 			return false;
 		}
-		if (constResolveSize != op2.constResolveSize) {
-			return false;
-		}
-		if (!SystemUtilities.isEqual(constResolveSpace, op2.constResolveSpace)) {
-			return false;
+		for (int i = 0; i < this.constResolveSpaces.size(); i++) {
+			if (!SystemUtilities.isEqual(this.constResolveSpaces.get(i), op2.constResolveSpaces.get(i))) {
+				return false;
+			}
+			if (!this.constResolveOffsets.get(i).equals(op2.constResolveOffsets.get(i))) {
+				return false;
+			}
+			if (!this.constResolveSizes.get(i).equals(op2.constResolveSizes.get(i))) {
+				return false;
+			}
 		}
 		if (!space.equals(op2.space)) {
 			return false;
