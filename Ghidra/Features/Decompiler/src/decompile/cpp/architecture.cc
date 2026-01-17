@@ -17,6 +17,7 @@
 
 #include "coreaction.hh"
 #include "flow.hh"
+#include "debug.hh"
 #ifdef CPUI_RULECOMPILE
 #include "rulecompile.hh"
 #endif
@@ -1413,6 +1414,24 @@ void Architecture::init(DocumentStorage &store)
   fillinReadOnlyFromLoader();
 }
 
+static bool isGoodDataSymbol(Symbol *sym, const Address &addr) {
+  if (sym == (Symbol*)0) return false;
+
+  // Reject special categories (especially equate)
+  int2 cat = sym->getCategory();
+  if (cat == Symbol::equate || cat == Symbol::function_parameter || cat == Symbol::fake_input)
+    return false;
+
+  // Must actually own storage that CONTAINS this address (offcuts allowed)
+  SymbolEntry *ent = sym->getMapEntry(addr);
+  if (ent == (SymbolEntry*)0) return false;
+
+  // Optional: reject undefined/auto names if those exist in your build
+  if (sym->isNameUndefined()) return false;
+
+  return true;
+}
+
 void Architecture::resetDefaultsInternal(void)
 
 {
@@ -1447,6 +1466,7 @@ void Architecture::resetDefaults(void)
 Address SegmentedResolver::resolve(uintb val,int4 sz,const Address &point,uintb &fullEncoding)
 
 {
+  SEGDBG("SegmentedResolver::resolve(val=0x%0llx, addr=0x%0llx)", val, point.getOffset());
   int4 innersz = segop->getInnerSize();
   if (sz >= 0 && sz <= innersz) { // If -sz- matches the inner size, consider the value a "near" pointer
   // In this case the address offset is not fully specified
@@ -1457,7 +1477,7 @@ Address SegmentedResolver::resolve(uintb val,int4 sz,const Address &point,uintb 
       // Try each candidate base register in order and prefer the first candidate
       // that resolves to a known symbol/label at the computed address.
       Address bestAddr;
-      uintb bestFull = 0;
+      uintb bestFullEncoding = 0;
       bool haveBest = false;
 
       for (int4 i = 0; i < (int4)rlist.size(); ++i) {
@@ -1465,9 +1485,11 @@ Address SegmentedResolver::resolve(uintb val,int4 sz,const Address &point,uintb 
         if (cr.space == (AddrSpace *)0) {
           continue;
         }
-        uintb base = glb->context->getTrackedValue(cr, point);
-        uintb full = (base << 8 * innersz) + (val & calc_mask(innersz));
 
+
+        // old logic to build an address, used to just return the address
+        uintb base = glb->context->getTrackedValue(cr, point);
+        uintb canFullEncoding = (base << 8 * innersz) + (val & calc_mask(innersz));
         vector<uintb> seginput;
         seginput.push_back(base);
         seginput.push_back(val);
@@ -1477,7 +1499,7 @@ Address SegmentedResolver::resolve(uintb val,int4 sz,const Address &point,uintb 
         // Remember the first candidate as a fallback in case no "good" symbol is found.
         if (!haveBest) {
           bestAddr = candAddr;
-          bestFull = full;
+          bestFullEncoding = canFullEncoding;
           haveBest = true;
         }
 
@@ -1492,17 +1514,38 @@ Address SegmentedResolver::resolve(uintb val,int4 sz,const Address &point,uintb 
             scope = gscope;
           }
 
-          if (scope->findFunction(candAddr) != (Funcdata *)0 ||
-              scope->findCodeLabel(candAddr) != (LabSymbol *)0 ||
-              scope->findAddr(candAddr, point) != (SymbolEntry *)0) {
-            fullEncoding = full;
-            return candAddr;
+          // "Good" heuristic: the candidate address resolves to a VARIABLE-like symbol.
+          // Reject functions, code labels, and equates. Allow offcuts inside a mapped data object.
+          SymbolEntry *entry = scope->findAddr(candAddr, point);
+          if (entry == (SymbolEntry*)0 && candAddr.getOffset() >= 2) {
+            entry = scope->findAddr(candAddr - 2, point);
+          }
+          if (entry != (SymbolEntry *)0) {
+            Symbol *sym = entry->getSymbol();
+            if (sym != (Symbol *)0) {
+              SEGDBG("SegmentedResolver::resolve(val=0x%0llx, addr=0x%0llx) symbol=%s", val, point.getOffset(), segdbg_symbol(sym).c_str());
+
+              int2 cat = sym->getCategory();
+              if (cat != Symbol::equate &&
+                  cat != Symbol::function_parameter &&
+                  cat != Symbol::fake_input) {
+
+                // Require that the symbol actually owns storage containing this address.
+                // This is the key for things like rgplr+0x1a offcuts.
+                if (sym->getMapEntry(candAddr) != (SymbolEntry *)0) {
+                  SEGDBG("SegmentedResolver::resolve(val=0x%0llx, addr=0x%0llx) symbol=%s ==> USING CANDIDATE", val, point.getOffset(), segdbg_symbol(sym).c_str());
+                  fullEncoding = canFullEncoding;
+                  return candAddr;
+                }
+              }
+            }
           }
         }
       }
 
       if (haveBest) {
-        fullEncoding = bestFull;
+        SEGDBG("SegmentedResolver::resolve(val=0x%0llx, addr=0x%0llx) ==>  addr=0x%0llx full=0x%0llx", val, point.getOffset(), bestAddr.getOffset(), bestFullEncoding);
+        fullEncoding = bestFullEncoding;
         return bestAddr;
       }
     }
@@ -1516,6 +1559,7 @@ Address SegmentedResolver::resolve(uintb val,int4 sz,const Address &point,uintb 
     seginput.push_back(base);
     seginput.push_back(val);
     val = segop->execute(seginput);
+    SEGDBG("SegmentedResolver::resolve ==> (far) 0x%011x", Address(spc,AddrSpace::addressToByte(val,spc->getWordSize())).getOffset());
     return Address(spc,AddrSpace::addressToByte(val,spc->getWordSize()));
   }
   return Address();		// Return invalid address

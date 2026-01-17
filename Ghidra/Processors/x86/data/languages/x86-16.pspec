@@ -18,9 +18,9 @@
       ]]></body>
     </pcode>
     <constresolve>
-      <!-- Prefer CS for code-segment immediates, but fall back to DS for data immediates -->
-      <register name="CS"/>
+      <!-- Default to DS unless we have a CS override at an exact location -->
       <register name="DS"/>
+      <register name="CS"/>
     </constresolve>
   </segmentop>
   <context_data>

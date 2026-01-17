@@ -1851,6 +1851,12 @@ void PrintC::pushConstant(uintb val,const Datatype *ct,tagtype tag,
 	return;
     }
 
+    // Never symbolize a null pointer constant. Even if DS:0000 has a label,
+    // comparisons against 0 should stay as 0 for readability.
+    if (val == 0) {
+      break;   // fall through to default printing (numeric 0)
+    }
+
     // If the pointer doesn't look like a printable string or function pointer,
     // still try to render it as a named symbol (e.g. CS: byte tables) instead
     // of a raw numeric address.
@@ -1868,8 +1874,27 @@ void PrintC::pushConstant(uintb val,const Datatype *ct,tagtype tag,
           scope = gscope;
         SymbolEntry *entry = scope->findAddr(addr, point);
         if (entry != (SymbolEntry *)0) {
-          pushSymbol(entry->getSymbol(), vn, op);
-          return;
+          Symbol *sym = entry->getSymbol();
+          if (sym != (Symbol *)0) {
+
+            // Only allow "variable-like" symbols, not equates/params/fake inputs.
+            int2 cat = sym->getCategory();
+            if (cat == Symbol::equate || cat == Symbol::function_parameter || cat == Symbol::fake_input) {
+              // fall through (print as numeric)
+            }
+            // Require that the symbol actually OWNS storage containing this address (offcuts OK).
+            else if (sym->getMapEntry(addr) == (SymbolEntry *)0) {
+              // fall through (print as numeric)
+            }
+            // Optional: reject undefined/auto names if your build uses them
+            else if (sym->isNameUndefined()) {
+              // fall through (print as numeric)
+            }
+            else {
+              pushSymbol(sym, vn, op);
+              return;
+            }
+          }
         }
       }
     }
