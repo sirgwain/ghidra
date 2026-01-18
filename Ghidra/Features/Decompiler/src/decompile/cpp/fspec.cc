@@ -2641,7 +2641,7 @@ void ProtoModel::decode(Decoder &decoder)
   extrapop = -300;
   hasThis = false;
   isConstruct = false;
-  isRightToLeft = false;
+  isRightToLeft = true;
   isPrinted = true;
   effectlist.clear();
   injectUponEntry = -1;
