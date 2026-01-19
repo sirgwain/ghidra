@@ -85,17 +85,26 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 					if (reg != null) {
 						BigInteger val = context.getValue(reg, false);
 						if (val != null) {
-							long lval = val.longValue();
-							Address refAddr = instr.getMinAddress().getNewAddress(lval);
-							if ((lval > 4096 || lval < 0) && program.getMemory().contains(refAddr)) {
-								if (instr.getOperandReferences(1).length == 0) {
-									instr.addOperandReference(1, refAddr, RefType.DATA,
-										SourceType.ANALYSIS);
+							long off = val.longValue() & 0xffffL;
+
+							// IMPORTANT: refuse seg=0 and refuse tiny offsets (keep your noise threshold)
+							if (off > 0x100) {
+								// If you *really* mean "use the instruction's segment":
+								long seg = getInstructionSegment(instr);
+								if (seg != 0 && seg > 0) {
+									Address target = toSegOff(program, instr.getMinAddress(), seg, off);
+									if (target != null) {
+										Symbol varSym = findDefinedDataSymbol(program, target);
+										if (varSym != null && instr.getOperandReferences(1).length == 0) {
+											instr.addOperandReference(1, target, RefType.DATA, SourceType.ANALYSIS);
+										}
+									}
 								}
 							}
 						}
 					}
 				}
+
 				return false;
 			}
 
