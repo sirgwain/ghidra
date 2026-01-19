@@ -417,29 +417,66 @@ bool PrintC::checkAddressOfCast(const PcodeOp *op) const
   return true;
 }
 
+static bool vnIsNamedHigh(const Varnode *vn, const char *name)
+{
+  if (vn == nullptr) return false;
+
+  // HighVariable is present when the varnode participates in high-level variable recovery.
+  HighVariable *hv = vn->getHigh();
+  if (hv == nullptr) return false;
+
+  Symbol *sym = hv->getSymbol();
+  if (sym == nullptr) return false;
+
+  const string &nm = sym->getName();
+  return (nm == name);
+}
+
 /// This is used for expression that require functional syntax, where the name of the
 /// function is the name of the operator. The inputs to the p-code op form the roots
 /// of the comma separated list of \e parameters within the syntax.
 /// \param op is the given PcodeOp
 void PrintC::opFunc(const PcodeOp *op)
-
 {
-  pushOp(&function_call,op);
-  // Using function syntax but don't markup the name as
-  // a normal function call
   string nm = op->getOpcode()->getOperatorName(op);
-  pushAtom(Atom(nm,optoken,EmitMarkup::no_color,op));
-  if (op->numInput() > 0) {
-    for(int4 i=0;i<op->numInput()-1;++i)
-      pushOp(&comma,op);
-  // implied vn's pushed on in reverse order for efficiency
-  // see PrintLanguage::pushVnImplied
-    for(int4 i=op->numInput()-1;i>=0;--i)
-      pushVn(op->getIn(i),op,mods);
+
+  // --- HACK: collapse CONCATxx(seg, off) to just off ---
+  if (op->numInput() == 2 && nm.size() >= 6 && nm.compare(0, 6, "CONCAT") == 0) {
+    const Varnode *hi = op->getIn(0);
+    const Varnode *lo = op->getIn(1);
+
+    bool dropHi = false;
+
+    // Case 1: constant segment == DS (0x1120)
+    if (hi->isConstant()) {
+      uintb seg = hi->getOffset() & 0xffff;
+      if (seg == 0x1120) dropHi = true;
+    }
+
+    // Case 2: "unaff_SS" segment glue
+    if (!dropHi && vnIsNamedHigh(hi, "unaff_SS")) {
+      dropHi = true;
+    }
+
+    if (dropHi) {
+      pushVn(lo, op, mods);
+      return;
+    }
   }
-  else				// Push empty token for void
-    pushAtom(Atom(EMPTY_STRING,blanktoken,EmitMarkup::no_color));
+  // --- end hack ---
+
+  pushOp(&function_call, op);
+  pushAtom(Atom(nm, optoken, EmitMarkup::no_color, op));
+  if (op->numInput() > 0) {
+    for (int4 i = 0; i < op->numInput() - 1; ++i)
+      pushOp(&comma, op);
+    for (int4 i = op->numInput() - 1; i >= 0; --i)
+      pushVn(op->getIn(i), op, mods);
+  }
+  else
+    pushAtom(Atom(EMPTY_STRING, blanktoken, EmitMarkup::no_color));
 }
+
 
 /// The syntax represents the given op using a standard c-language cast.  The data-type
 /// being cast to is obtained from the output variable of the op. The input expression is
