@@ -57,6 +57,7 @@ public class PrototypeModel {
 	private InputListType inputListType = InputListType.STANDARD;
 	private boolean hasThis;		// Convention has a this (auto-parameter)
 	private boolean isConstruct;		// Convention is used for object construction
+	private boolean isRightToLeft;	// Parameter stacking convention
 	private boolean hasUponEntry;	// Does this have an uponentry injection
 	private boolean hasUponReturn;	// Does this have an uponreturn injection
 
@@ -86,8 +87,9 @@ public class PrototypeModel {
 		compatModel = model;
 		localRange = new AddressSet(model.localRange);
 		paramRange = new AddressSet(model.paramRange);
-		hasThis = model.hasThis || name.equals(CompilerSpec.CALLING_CONVENTION_thiscall);
+		hasThis = model.hasThis || name.startsWith(CompilerSpec.CALLING_CONVENTION_thiscall);
 		isConstruct = model.isConstruct;
+		isRightToLeft = model.isRightToLeft;
 		hasUponEntry = model.hasUponEntry;
 		hasUponReturn = model.hasUponReturn;
 	}
@@ -109,6 +111,7 @@ public class PrototypeModel {
 		paramRange = null;
 		hasThis = false;
 		isConstruct = false;
+		isRightToLeft = true;	// the default
 		hasUponEntry = false;
 		hasUponReturn = false;
 	}
@@ -217,6 +220,12 @@ public class PrototypeModel {
 	}
 
 	/**
+	 * @return true if this model uses right-to-left parameter stacking
+	 */
+	public boolean isRightToLeft() {
+		return isRightToLeft;
+	}
+	/**
 	 * @return the allocation strategy for this model
 	 */
 	public InputListType getInputListType() {
@@ -257,6 +266,22 @@ public class PrototypeModel {
 			return res.get(0).getVariableStorage(program);
 		}
 		return null;
+	}
+
+	/**
+	 * Used to return the size of a pointer for this model prototype.
+	 * @param space is the default AddressSpace
+	 * @return size of pointer
+	 */
+	public int getPointerSize(AddressSpace space) {
+		int pointerSize = (space == null) ? -1 : space.getPointerSize();
+		if (name.endsWith("16near")) {
+			pointerSize = 2;
+		}
+		else if (name.endsWith("16far")) {
+			pointerSize = 4;
+		}
+		return pointerSize;
 	}
 
 	/**
@@ -359,8 +384,35 @@ public class PrototypeModel {
 	 */
 	public void assignParameterStorage(PrototypePieces proto, DataTypeManager dtManager,
 			ArrayList<ParameterPieces> res, boolean addAutoParams) {
+		
 		outputParams.assignMap(proto, dtManager, res, addAutoParams);
+		
+		// Deal with left-to-right (PASCAL convention) parameter ordering
+		if (!isRightToLeft) {
+			// swap around the datatypes to map variable storage high-to-low
+			for (int i = 0; i < proto.intypes.size() / 2; i++) {
+				DataType tmp = proto.intypes.get(proto.intypes.size()-1 - i);
+				proto.intypes.set(proto.intypes.size()-1 - i, proto.intypes.get(i));
+				proto.intypes.set(i, tmp);
+			}
+		}
+		
 		inputParams.assignMap(proto, dtManager, res, addAutoParams);
+
+		// Deal with left-to-right (PASCAL convention) parameter ordering
+		if (!isRightToLeft) {
+			int inputOffset = (res.size() - proto.intypes.size());
+			for (int i = 0; i < proto.intypes.size() / 2; i++) {
+				// swap back the input datatypes
+				DataType tmpDt = proto.intypes.get(proto.intypes.size()-1 - i);
+				proto.intypes.set(proto.intypes.size()-1 - i, proto.intypes.get(i));
+				proto.intypes.set(i, tmpDt);
+				// swap back the resulting input only storage to be ordered correctly
+				ParameterPieces tmpPiece = res.get(res.size()-1 - i);
+				res.set(res.size()-1 - i, res.get(inputOffset+i));
+				res.set(inputOffset+i, tmpPiece);
+			}
+		}
 
 		if (hasThis && addAutoParams && res.size() > 1) {
 			int thisIndex = 1;
@@ -399,11 +451,13 @@ public class PrototypeModel {
 	public VariableStorage[] getStorageLocations(Program program, DataType[] dataTypes,
 			boolean addAutoParams) {
 
+		int pointerSize = getPointerSize(program.getAddressFactory().getDefaultAddressSpace());
+
 		DataType injectedThis = null;
 		if (addAutoParams && hasThis) {
 			// explicit support for auto 'this' parameter
 			// must inject pointer arg to obtain storage assignment
-			injectedThis = new PointerDataType(program.getDataTypeManager());
+			injectedThis = new PointerDataType(null, pointerSize, program.getDataTypeManager());
 		}
 		PrototypePieces proto = new PrototypePieces(this, dataTypes, injectedThis);
 
@@ -478,6 +532,9 @@ public class PrototypeModel {
 		}
 		if (isConstruct) {
 			encoder.writeBool(ATTRIB_CONSTRUCTOR, true);
+		}
+		if (isRightToLeft) {
+			encoder.writeBool(ATTRIB_ISRIGHTTOLEFT, true);
 		}
 		if (inputListType != InputListType.STANDARD) {
 			encoder.writeString(ATTRIB_STRATEGY, "register");
@@ -639,16 +696,21 @@ public class PrototypeModel {
 		stackshift = SpecXmlUtils.decodeInt(protoElement.getAttribute(ATTRIB_STACKSHIFT.name()));
 		hasThis = false;
 		isConstruct = false;
+		isRightToLeft = true;
 		String thisString = protoElement.getAttribute(ATTRIB_HASTHIS.name());
 		if (thisString != null) {
 			hasThis = SpecXmlUtils.decodeBoolean(thisString);
 		}
 		else {
-			hasThis = name.equals(CompilerSpec.CALLING_CONVENTION_thiscall);
+			hasThis = name.startsWith(CompilerSpec.CALLING_CONVENTION_thiscall);
 		}
 		String constructString = protoElement.getAttribute(ATTRIB_CONSTRUCTOR.name());
 		if (constructString != null) {
 			isConstruct = SpecXmlUtils.decodeBoolean(constructString);
+		}
+		String isrighttoleftString = protoElement.getAttribute(ATTRIB_ISRIGHTTOLEFT.name());
+		if (isrighttoleftString != null) {
+			isRightToLeft = SpecXmlUtils.decodeBoolean(isrighttoleftString);
 		}
 
 		buildParamList(protoElement.getAttribute(ATTRIB_STRATEGY.name()));
@@ -771,6 +833,9 @@ public class PrototypeModel {
 			return false;
 		}
 		if (extrapop != obj.extrapop || stackshift != obj.stackshift) {
+			return false;
+		}
+		if (isRightToLeft != obj.isRightToLeft) {
 			return false;
 		}
 		if (hasThis != obj.hasThis || isConstruct != obj.isConstruct) {
