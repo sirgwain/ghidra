@@ -1903,31 +1903,31 @@ void PrintC::pushConstant(uintb val,const Datatype *ct,tagtype tag,
       Address point;
       if (op != (const PcodeOp *)0)
         point = op->getAddr();
-      Address addr = glb->resolveConstant(spc,val,ct->getSize(),point,fullEncoding);
+
+      // Use near-pointer size for segmented architectures (Win16),
+      // so DS/CS resolve-list logic is exercised instead of forcing FAR resolution.
+      SegmentOp *segop = glb->getSegmentOp(spc);
+      int4 innersz = (segop != nullptr) ? segop->getInnerSize() : ct->getSize();
+
+      Address addr = glb->resolveConstant(spc, val, innersz, point, fullEncoding);
       if (!addr.isInvalid() && glb->symboltab != (Database *)0) {
         Scope *gscope = glb->symboltab->getGlobalScope();
-        Scope *scope = glb->symboltab->mapScope(gscope,addr,point);
+        Scope *scope = glb->symboltab->mapScope(gscope, addr, point);
         if (scope == (Scope *)0)
           scope = gscope;
+
         SymbolEntry *entry = scope->findAddr(addr, point);
         if (entry != (SymbolEntry *)0) {
           Symbol *sym = entry->getSymbol();
           if (sym != (Symbol *)0) {
 
-            // Only allow "variable-like" symbols, not equates/params/fake inputs.
             int2 cat = sym->getCategory();
-            if (cat == Symbol::equate || cat == Symbol::function_parameter || cat == Symbol::fake_input) {
-              // fall through (print as numeric)
-            }
-            // Require that the symbol actually OWNS storage containing this address (offcuts OK).
-            else if (sym->getMapEntry(addr) == (SymbolEntry *)0) {
-              // fall through (print as numeric)
-            }
-            // Optional: reject undefined/auto names if your build uses them
-            else if (sym->isNameUndefined()) {
-              // fall through (print as numeric)
-            }
-            else {
+            if (cat != Symbol::equate &&
+                cat != Symbol::function_parameter &&
+                cat != Symbol::fake_input &&
+                sym->getMapEntry(addr) != (SymbolEntry *)0 &&
+                !sym->isNameUndefined()) {
+
               pushSymbol(sym, vn, op);
               return;
             }
@@ -1935,6 +1935,7 @@ void PrintC::pushConstant(uintb val,const Datatype *ct,tagtype tag,
         }
       }
     }
+
     break;
   case TYPE_FLOAT:
     push_float(val,ct->getSize(),tag,vn,op);

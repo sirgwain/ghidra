@@ -1468,89 +1468,112 @@ Address SegmentedResolver::resolve(uintb val,int4 sz,const Address &point,uintb 
 {
   SEGDBG("SegmentedResolver::resolve(val=0x%0llx, addr=0x%0llx)", val, point.getOffset());
   int4 innersz = segop->getInnerSize();
-  if (sz >= 0 && sz <= innersz) { // If -sz- matches the inner size, consider the value a "near" pointer
-  // In this case the address offset is not fully specified
-  // we check if the rest is stored in a context variable
-  // (as with near pointers)
+
+  if (sz >= 0 && sz <= innersz) {
     const vector<VarnodeData> &rlist = segop->getResolveList();
     if (!rlist.empty()) {
-      // Try each candidate base register in order and prefer the first candidate
-      // that resolves to a known symbol/label at the computed address.
+
       Address bestAddr;
       uintb bestFullEncoding = 0;
       bool haveBest = false;
 
+      int bestScore = -0x7fffffff;
+      int bestIndex = 0x7fffffff;
+
       for (int4 i = 0; i < (int4)rlist.size(); ++i) {
         const VarnodeData &cr = rlist[i];
-        if (cr.space == (AddrSpace *)0) {
+        if (cr.space == (AddrSpace *)0)
           continue;
-        }
 
-
-        // old logic to build an address, used to just return the address
         uintb base = glb->context->getTrackedValue(cr, point);
         uintb canFullEncoding = (base << 8 * innersz) + (val & calc_mask(innersz));
+
         vector<uintb> seginput;
         seginput.push_back(base);
         seginput.push_back(val);
+
         uintb phys = segop->execute(seginput);
         Address candAddr(spc, AddrSpace::addressToByte(phys, spc->getWordSize()));
 
-        // Remember the first candidate as a fallback in case no "good" symbol is found.
+        // Always keep a fallback (first viable candidate)
         if (!haveBest) {
           bestAddr = candAddr;
           bestFullEncoding = canFullEncoding;
           haveBest = true;
+          bestScore = 0;
+          bestIndex = i;
         }
 
-        // "Good" heuristic: the candidate address already has a symbol/label/function.
-        // This matches the symbol-gated behavior that avoids spurious pointer resolutions.
+        int score = 0;
+
+        // Prefer the candidate whose segment base matches the instruction's CS (segment of 'point')
+        uintb pointSeg = (point.getOffset() >> (8 * innersz)) & calc_mask(innersz);
+        if (base == pointSeg) {
+          score += 200;
+        }
+
+        // Symbol-gated “goodness” scoring (your existing logic, but not early-return)
         if (glb->symboltab != (Database *)0) {
-          // The symbol query APIs live on Scope, not Database.
-          // Map the candidate to the appropriate scope, falling back to global.
           Scope *gscope = glb->symboltab->getGlobalScope();
           Scope *scope = glb->symboltab->mapScope(gscope, candAddr, point);
-          if (scope == (Scope *)0) {
+          if (scope == (Scope *)0)
             scope = gscope;
-          }
 
-          // "Good" heuristic: the candidate address resolves to a VARIABLE-like symbol.
-          // Reject functions, code labels, and equates. Allow offcuts inside a mapped data object.
           SymbolEntry *entry = scope->findAddr(candAddr, point);
-          if (entry == (SymbolEntry*)0 && candAddr.getOffset() >= 2) {
+          if (entry == (SymbolEntry*)0 && candAddr.getOffset() >= 2)
             entry = scope->findAddr(candAddr - 2, point);
-          }
+
           if (entry != (SymbolEntry *)0) {
             Symbol *sym = entry->getSymbol();
             if (sym != (Symbol *)0) {
-              SEGDBG("SegmentedResolver::resolve(val=0x%0llx, addr=0x%0llx) symbol=%s", val, point.getOffset(), segdbg_symbol(sym).c_str());
+              SEGDBG("SegmentedResolver::resolve(val=0x%0llx, addr=0x%0llx) symbol=%s",
+                     val, point.getOffset(), segdbg_symbol(sym).c_str());
+
+              const string &nm = sym->getName();
+              if (nm.rfind("DAT_", 0) == 0 || nm.rfind("LAB_", 0) == 0) {
+                score -= 50;          // big penalty
+              } else if (!sym->isNameUndefined()) {
+                score += 10;          // small bonus for “real” names
+              }
 
               int2 cat = sym->getCategory();
               if (cat != Symbol::equate &&
                   cat != Symbol::function_parameter &&
                   cat != Symbol::fake_input) {
 
-                // Require that the symbol actually owns storage containing this address.
-                // This is the key for things like rgplr+0x1a offcuts.
+                // Owns storage at this address (offcuts OK)
                 if (sym->getMapEntry(candAddr) != (SymbolEntry *)0) {
-                  SEGDBG("SegmentedResolver::resolve(val=0x%0llx, addr=0x%0llx) symbol=%s ==> USING CANDIDATE", val, point.getOffset(), segdbg_symbol(sym).c_str());
-                  fullEncoding = canFullEncoding;
-                  return candAddr;
+                  score += 50;
+
+                  // Bonus if name is “real” (avoid auto DAT/LAB driving resolve)
+                  // Note: keep whatever your build's "undefined" predicate is; this is your current gate.
+                  if (!sym->isNameUndefined()) {
+                    score += 10;
+                  }
                 }
               }
             }
           }
         }
+
+        // Pick best by score; tie-break by resolve-list order (lower i wins)
+        if (score > bestScore || (score == bestScore && i < bestIndex)) {
+          bestScore = score;
+          bestIndex = i;
+          bestAddr = candAddr;
+          bestFullEncoding = canFullEncoding;
+        }
       }
 
       if (haveBest) {
-        SEGDBG("SegmentedResolver::resolve(val=0x%0llx, addr=0x%0llx) ==>  addr=0x%0llx full=0x%0llx", val, point.getOffset(), bestAddr.getOffset(), bestFullEncoding);
+        SEGDBG("SegmentedResolver::resolve(val=0x%0llx, addr=0x%0llx) ==> addr=0x%0llx full=0x%0llx score=%d idx=%d",
+               val, point.getOffset(), bestAddr.getOffset(), bestFullEncoding, bestScore, bestIndex);
         fullEncoding = bestFullEncoding;
         return bestAddr;
       }
     }
   }
-  else { // For anything else, consider it a "far" pointer
+  else {
     fullEncoding = val;
     int4 outersz = segop->getBaseSize();
     uintb base = (val >> 8*innersz) & calc_mask(outersz);
@@ -1559,11 +1582,13 @@ Address SegmentedResolver::resolve(uintb val,int4 sz,const Address &point,uintb 
     seginput.push_back(base);
     seginput.push_back(val);
     val = segop->execute(seginput);
-    SEGDBG("SegmentedResolver::resolve ==> (far) 0x%011x", Address(spc,AddrSpace::addressToByte(val,spc->getWordSize())).getOffset());
+    SEGDBG("SegmentedResolver::resolve ==> (far) 0x%011x",
+           Address(spc,AddrSpace::addressToByte(val,spc->getWordSize())).getOffset());
     return Address(spc,AddrSpace::addressToByte(val,spc->getWordSize()));
   }
-  return Address();		// Return invalid address
+  return Address();
 }
+
 
 #ifdef CPUI_STATISTICS
 
