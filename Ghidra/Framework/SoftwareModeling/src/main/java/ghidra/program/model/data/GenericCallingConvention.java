@@ -69,7 +69,17 @@ public enum GenericCallingConvention {
 	/**
 	 * Similar to pascal but using a far pointer
 	 */
-	pascal16far(CompilerSpec.CALLING_CONVENTION_pascal + "16far")
+	pascal16far(CompilerSpec.CALLING_CONVENTION_pascal + "16far"),
+
+	/**
+	 * Similar to cdecl but using a far pointer
+	 */
+	stdcall16far(CompilerSpec.CALLING_CONVENTION_stdcall + "16far"),
+
+	/**
+	 * Similar to cdecl but using a far pointer
+	 */
+	cdecl16far(CompilerSpec.CALLING_CONVENTION_cdecl + "16far")
 	;
 
 	// Append new conventions to the bottom only so that ordinal values will not change!!
