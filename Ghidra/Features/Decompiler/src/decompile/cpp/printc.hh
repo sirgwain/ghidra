@@ -22,6 +22,8 @@
 #include "printlanguage.hh"
 #include "comment.hh"
 
+#include <unordered_set>
+
 namespace ghidra {
 
 class FuncProto;
@@ -157,6 +159,13 @@ protected:
   string sizeSuffix;		///< Characters to print to indicate a \e long integer token
   CommentSorter commsorter;	///< Container/organizer for comments in the current function
 
+  // Win16 helper: mark integer constants that are part of an int->ptr cast input
+  // so they can be printed as segment-relative symbols (e.g., CS:0x0768 -> rgscanner).
+  mutable std::unordered_set<const Varnode *> addrLikeConsts;
+
+  void markAddrLikeExpr(const Varnode *vn);
+  const Symbol *lookupSymbolForNearConst(uintb val,int4 sz,const PcodeOp *op) const;
+
   // Routines that are specific to C/C++
   void buildTypeStack(const Datatype *ct,vector<const Datatype *> &typestack);	///< Prepare to push components of a data-type declaration
   void pushPrototypeInputs(const FuncProto *proto);				///< Push input parameters
@@ -233,6 +242,8 @@ protected:
   virtual void emitTypeDefinition(const Datatype *ct);
   virtual bool checkPrintNegation(const Varnode *vn);
   void pushTypePointerRel(const PcodeOp *op);
+  bool shouldElideTypeCast(const PcodeOp *op, Datatype *toDt) const;
+
 public:
   PrintC(Architecture *g,const string &nm="c-language");	///< Constructor
   void setNULLPrinting(bool val) { option_NULL = val; }		///< Toggle the printing of a 'NULL' token

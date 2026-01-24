@@ -15,6 +15,7 @@
  */
 #include "printc.hh"
 #include "funcdata.hh"
+#include "debug.hh"
 
 namespace ghidra {
 
@@ -101,6 +102,247 @@ const string PrintC::KEYWORD_DEFAULT = "default";
 const string PrintC::KEYWORD_RETURN = "return";
 const string PrintC::KEYWORD_NEW = "new";
 const string PrintC::typePointerRelToken = "ADJ";
+
+static bool isIntLike(const Datatype *dt)
+{
+  if (!dt) return false;
+  type_metatype mt = dt->getMetatype();
+  return mt == TYPE_INT || mt == TYPE_UINT;
+}
+
+static bool ptrWidthIntToPtrCastIsSegmentGlue(const PcodeOp *op)
+{
+  // We only want to do this when the thing being cast is the RESULT of the PIECE
+  // that you're already collapsing (segment glue).
+  const Varnode *in = op ? op->getIn(0) : nullptr;
+  if (!in) return false;
+
+  // In opTypeCast, `in` might be the output of the PIECE itself OR a tmp defined by it.
+  // If in is written by PIECE => good.
+  if (in->isWritten()) {
+    const PcodeOp *def = in->getDef();
+    if (def && def->code() == CPUI_PIECE) return true;
+  }
+
+  // Also accept: the input varnode is the OUT of a CONCAT function-call op (your print-time CONCAT)
+  // In practice CPUI_PIECE is the one you’ll see.
+  return false;
+}
+
+static bool dtSameShallow(const Datatype *a, const Datatype *b)
+{
+  if (a == b) return true;
+  if (!a || !b) return false;
+  if (a->getMetatype() != b->getMetatype()) return false;
+  if (a->getSize() != b->getSize()) return false;
+
+  if (a->getMetatype() == TYPE_PTR) {
+    const auto *ap = (const TypePointer *)a;
+    const auto *bp = (const TypePointer *)b;
+    return dtSameShallow(ap->getPtrTo(), bp->getPtrTo());
+  }
+
+  const string &an = a->getName();
+  const string &bn = b->getName();
+  if (an.empty() || bn.empty()) return false; // conservative for non-ptr
+  return an == bn;
+}
+
+// Compare pointer *base type* ignoring pointer width.
+// This is specifically for Win16 "partial" tied vars where the low word of a far pointer
+// can be typed as T* but presented as a 2-byte varnode.
+static bool dtSamePtrBaseIgnoreSize(const Datatype *a, const Datatype *b)
+{
+  if (!a || !b) return false;
+  if (a->getMetatype() != TYPE_PTR || b->getMetatype() != TYPE_PTR) return false;
+
+  const auto *ap = (const TypePointer *)a;
+  const auto *bp = (const TypePointer *)b;
+  const Datatype *ab = ap->getPtrTo();
+  const Datatype *bb = bp->getPtrTo();
+
+  // Base types should still match strongly.
+  return dtSameShallow(ab, bb);
+}
+
+
+static bool isVoidType(const Datatype *dt)
+{
+  return dt && dt->getMetatype() == TYPE_VOID;
+}
+
+static bool isPtrType(const Datatype *dt)
+{
+  return dt && dt->getMetatype() == TYPE_PTR;
+}
+
+static bool vnIsNamedHigh(const Varnode *vn, const char *name)
+{
+  if (vn == nullptr) return false;
+
+  // HighVariable is present when the varnode participates in high-level variable recovery.
+  HighVariable *hv = vn->getHigh();
+  if (hv == nullptr) return false;
+
+  Symbol *sym = hv->getSymbol();
+  if (sym == nullptr) return false;
+
+  const string &nm = sym->getName();
+  return (nm == name);
+}
+
+static const Datatype *vnDefFacingType(const Varnode *vn)
+{
+  if (!vn) return nullptr;
+  return vn->getHighTypeDefFacing();
+}
+
+static const Datatype *vnReadFacingType(const Varnode *vn, const PcodeOp *ctx)
+{
+  if (!vn) return nullptr;
+  return vn->getHighTypeReadFacing(ctx);
+}
+
+static bool vnIsAddressOfLocalOfType(const Varnode *vn, const PcodeOp *ctx, const Datatype *toDt)
+{
+  // Detect patterns that end up printing as &local and are already correct type.
+  // In pcode, address-of often comes from CPUI_PTRADD / CPUI_PTRSUB / CPUI_INT_ADD etc.
+  // But the simplest win: if the vn already has toDt, we don't need this special-case.
+  const Datatype *fromDt = vnReadFacingType(vn, ctx);
+  return dtSameShallow(toDt, fromDt);
+}
+
+static bool getPointSeg16(const PcodeOp *ctx, uint16_t &outSeg)
+{
+  if (!ctx) return false;
+
+  Address a = ctx->getAddr();                 // sometimes ctx->getSeqNum().getAddr()
+  if (a.isInvalid()) return false;
+
+  uintb off = a.getOffset();
+  outSeg = (uint16_t)((off >> 16) & 0xffff);  // segment:offset packed in 32-bit offset
+  return true;
+}
+
+static const Varnode *peelCastSubpiece(const Varnode *vn)
+{
+  for (int i = 0; vn && vn->isWritten() && i < 8; i++) {
+    const PcodeOp *d = vn->getDef();
+    if (!d) break;
+    OpCode c = d->code();
+    if (c == CPUI_CAST || c == CPUI_SUBPIECE) {
+      vn = d->getIn(0);
+      continue;
+    }
+    break;
+  }
+  return vn;
+}
+
+static const Varnode *getSubpieceBase2(const Varnode *vn)
+{
+  if (!vn || !vn->isWritten()) return nullptr;
+  const PcodeOp *d = vn->getDef();
+  if (!d || d->code() != CPUI_SUBPIECE || d->numInput() != 2) return nullptr;
+
+  const Varnode *off = d->getIn(1);
+  if (!off || !off->isConstant()) return nullptr;
+  if ((off->getOffset() & 0xff) != 2) return nullptr; // high word for 32-bit
+
+  return d->getIn(0);
+}
+
+static const Varnode *getAddBaseConst(const Varnode *vn, int64_t &addk)
+{
+  addk = 0;
+  if (!vn || !vn->isWritten()) return nullptr;
+  const PcodeOp *d = vn->getDef();
+  if (!d) return nullptr;
+
+  if (d->code() == CPUI_INT_ADD && d->numInput() == 2) {
+    const Varnode *a = d->getIn(0);
+    const Varnode *b = d->getIn(1);
+    if (b && b->isConstant()) {
+      addk = (int64_t)b->getOffset();
+      return a;
+    }
+    if (a && a->isConstant()) {
+      addk = (int64_t)a->getOffset();
+      return b;
+    }
+  }
+
+  // Optional: handle PTRADD if your compiler emits it
+  if (d->code() == CPUI_PTRADD && d->numInput() >= 2) {
+    const Varnode *base = d->getIn(0);
+    const Varnode *idx  = d->getIn(1);
+    if (idx && idx->isConstant()) {
+      addk = (int64_t)idx->getOffset(); // element count; for char* this is bytes
+      return base;
+    }
+  }
+
+  return nullptr;
+}
+
+static bool isDropHiConcatPiece(const Varnode *vn, const PcodeOp *ctx)
+{
+  if (!vn || !vn->isWritten()) return false;
+
+  // SEGDBG("isDropHiConcatPiece: checking vn=%s, ctx=%s", segdbg_varnode(vn).c_str(), segdbg_pcodeop(ctx).c_str());
+
+  const PcodeOp *def = vn->getDef();
+  if (!def) return false;
+
+  if (def->code() != CPUI_PIECE || def->numInput() != 2) return false;
+
+  const Varnode *hi = def->getIn(0);
+  if (!hi) return false;
+
+  // Case: symbolic glue vars
+  if (vnIsNamedHigh(hi, "unaff_SS")) return true;
+  if (vnIsNamedHigh(hi, "unaff_DS")) return true;
+  if (vnIsNamedHigh(hi, "unaff_CS")) return true;
+
+  // Case: constant segment
+  if (hi->isConstant()) {
+    uint16_t seg = (uint16_t)(hi->getOffset() & 0xffff);
+
+    // Drop DS if you still want that special-case
+    if (seg == 0x1120) return true;
+
+    // Drop CS if it matches the segment of the current print site ("point")
+    uint16_t pointSeg;
+    if (getPointSeg16(ctx, pointSeg) && seg == pointSeg)
+      return true;
+  }
+  
+    // Case: "preserve segment" idiom: CONCAT22(SUBPIECE(p,2), p + k)
+  {
+    const Varnode *lo = def->getIn(1);
+    const Varnode *hiBase = getSubpieceBase2(hi);
+    if (hiBase && lo) {
+      int64_t addk = 0;
+      const Varnode *loBase = getAddBaseConst(lo, addk);
+      hiBase = peelCastSubpiece(hiBase);
+      loBase = peelCastSubpiece(loBase);
+
+      // Compare by HighVariable when possible (more robust than pointer equality)
+      if (loBase && hiBase) {
+        HighVariable *h1 = loBase->getHigh();
+        HighVariable *h2 = hiBase->getHigh();
+        if ((h1 && h2 && h1 == h2) || loBase == hiBase) {
+          // For your exact case addk==1, but allowing any small +k is fine
+          return true;
+        }
+      }
+    }
+  }
+
+  // SEGDBG("isDropHiConcatPiece: not dropping concat vn=%s, ctx=%s", segdbg_varnode(vn).c_str(), segdbg_pcodeop(ctx).c_str());
+
+  return false;
+}
 
 // Constructing this registers the capability
 PrintCCapability PrintCCapability::printCCapability;
@@ -417,38 +659,319 @@ bool PrintC::checkAddressOfCast(const PcodeOp *op) const
   return true;
 }
 
+
 /// This is used for expression that require functional syntax, where the name of the
 /// function is the name of the operator. The inputs to the p-code op form the roots
 /// of the comma separated list of \e parameters within the syntax.
 /// \param op is the given PcodeOp
 void PrintC::opFunc(const PcodeOp *op)
-
 {
-  pushOp(&function_call,op);
-  // Using function syntax but don't markup the name as
-  // a normal function call
   string nm = op->getOpcode()->getOperatorName(op);
-  pushAtom(Atom(nm,optoken,EmitMarkup::no_color,op));
-  if (op->numInput() > 0) {
-    for(int4 i=0;i<op->numInput()-1;++i)
-      pushOp(&comma,op);
-  // implied vn's pushed on in reverse order for efficiency
-  // see PrintLanguage::pushVnImplied
-    for(int4 i=op->numInput()-1;i>=0;--i)
-      pushVn(op->getIn(i),op,mods);
+
+  // --- HACK: collapse CONCATxx(seg, off) to just off ---
+  if (op->numInput() == 2 && nm.size() >= 6 && nm.compare(0, 6, "CONCAT") == 0) {
+    const Varnode *lo = op->getIn(1);
+
+    // Prefer using the unified predicate:
+    // - it checks DS (0x1120), unaff_SS/unaff_DS/unaff_CS
+    // - it checks "CS at this point" via ctx address
+    // NOTE: it expects vn->getDef() == CPUI_PIECE, so pass op->getOut().
+    const Varnode *out = op->getOut();
+
+    if (isDropHiConcatPiece(out, op)) {
+      pushVn(lo, op, mods);
+      return;
+    }
+
+    // If you want to be extra safe: occasionally opFunc may be invoked on something
+    // that *prints* like CONCAT but isn't actually CPUI_PIECE in pcode for some reason.
+    // In that case, out won't satisfy isDropHiConcatPiece. You can optionally keep
+    // a small fallback here, but I'd start without it to see your SEGDBG traces.
   }
-  else				// Push empty token for void
-    pushAtom(Atom(EMPTY_STRING,blanktoken,EmitMarkup::no_color));
+  // --- end hack ---
+
+  pushOp(&function_call, op);
+  pushAtom(Atom(nm, optoken, EmitMarkup::no_color, op));
+  if (op->numInput() > 0) {
+    for (int4 i = 0; i < op->numInput() - 1; ++i)
+      pushOp(&comma, op);
+    for (int4 i = op->numInput() - 1; i >= 0; --i)
+      pushVn(op->getIn(i), op, mods);
+  }
+  else {
+    pushAtom(Atom(EMPTY_STRING, blanktoken, EmitMarkup::no_color));
+  }
 }
+
+
+
+bool PrintC::shouldElideTypeCast(const PcodeOp *op, Datatype *toDt) const
+{
+  if (!op || op->numInput() != 1 || !toDt) return false;
+
+  const Varnode *in = op->getIn(0);
+  if (!in) return false;
+
+  
+  const Datatype *fromDt = vnReadFacingType(in, op);
+  if (!fromDt) return false;
+  
+  // SEGDBG("PrintC::shouldElideTypeCast: op=%s, toDt=%s, fromDt=%s", segdbg_pcodeop(op).c_str(), toDt->getName().c_str(), fromDt->getName().c_str());
+  
+  // 1) cast-to-void is usually just noise
+  if (isVoidType(toDt)) return true;
+
+  // 2) if already same type, cast is redundant
+  if (dtSameShallow(toDt, fromDt)) return true;
+
+  SEGDBG("CASTCHK: op=%s", segdbg_pcodeop(op).c_str());
+  SEGDBG("CASTCHK: toDt=%s", segdbg_datatype(toDt).c_str());
+  SEGDBG("CASTCHK: fromDt=%s", segdbg_datatype(fromDt).c_str());
+  SEGDBG("CASTCHK: in=\n%s\n", segdbg_varnode(in).c_str());
+
+  if (in->isWritten()) {
+    SEGDBG("CASTCHK: in.def=%s", segdbg_pcodeop(in->getDef()).c_str());
+  }
+
+  // 2.5) If the varnode's *defined* type already matches the cast target,
+  // the cast is redundant even if the read-facing type degrades to ulong.
+  {
+    const Datatype *defDt = vnDefFacingType(in);
+    SEGDBG("CASTCHK: defDt=%s", segdbg_datatype(defDt).c_str());
+    if (defDt && dtSameShallow(toDt, defDt)) {
+      SEGDBG("CASTCHK: RETURN true (def-facing matches toDt)");
+      return true;
+    }
+  }
+
+  // ---- HARD GUARD: keep int->ptr casts unless we can prove the cast is redundant ----
+  // This prevents losing important casts like (SHDEF *)(pt.y*0x93 + 0x3f00).
+  if (isPtrType(toDt) && isIntLike(fromDt)) {
+    SEGDBG("CASTCHK: int->ptr guard hit");
+
+    // We only elide when the integer is really the output of a droppable PIECE/CONCAT
+    // (segment glue), AND collapsing it would leave a low expression that is already
+    // typed as the same pointer.
+    const Varnode *pieceOut = nullptr;
+    if (isDropHiConcatPiece(in, op)) {
+      pieceOut = in;
+      SEGDBG("CASTCHK: isDropHiConcatPiece(in)=1");
+    }
+    else {
+      // Peel trivial CAST/SUBPIECE noise to find a PIECE directly.
+      const Varnode *peeled = peelCastSubpiece(in);
+      if (peeled && peeled->isWritten()) {
+        const PcodeOp *d = peeled->getDef();
+        if (d && d->code() == CPUI_PIECE && isDropHiConcatPiece(peeled, op)) {
+          pieceOut = peeled;
+          SEGDBG("CASTCHK: isDropHiConcatPiece(peeled)=1");
+        }
+      }
+    }
+
+    if (!pieceOut) {
+      SEGDBG("CASTCHK: RETURN false (plain int->ptr)");
+      return false;
+    }
+
+    const PcodeOp *def = pieceOut->getDef();
+    SEGDBG("CASTCHK: pieceOut.def=%s", segdbg_pcodeop(def).c_str());
+    const Varnode *lo = (def && def->numInput() == 2) ? def->getIn(1) : nullptr;
+    if (!lo) {
+      SEGDBG("CASTCHK: RETURN false (piece has no lo)");
+      return false;
+    }
+
+    SEGDBG("CASTCHK: piece.lo=\n%s\n", segdbg_varnode(lo).c_str());
+    const Datatype *loDt = vnReadFacingType(lo, op);
+    SEGDBG("CASTCHK: piece.loDt=%s", segdbg_datatype(loDt).c_str());
+
+    // Key rule for your workflow:
+    //   If collapsing the PIECE leaves behind a low expression already typed as the
+    //   same pointer base type, the cast is redundant for printing.
+    //
+    // IMPORTANT: On Win16 far pointers, the low word frequently appears as a 2-byte
+    // "partial" varnode (tied to the 4-byte symbol). The Datatype can still be T*.
+    // We must therefore compare pointer *base* and ignore pointer-width mismatches here.
+    if (loDt && isPtrType(loDt)) {
+      SEGDBG("CASTCHK: glue lo is ptr; loDt.size=%d toDt.size=%d lo.vn.size=%d",
+             (int)loDt->getSize(), (int)toDt->getSize(), (int)lo->getSize());
+
+      if (dtSamePtrBaseIgnoreSize(toDt, loDt)) {
+        SEGDBG("CASTCHK: RETURN true (int->ptr glue, lo already same ptr base)");
+        return true;
+      }
+
+      // As a weaker fallback, if both are pointers and the pointer width matches,
+      // treat it as redundant (your "ignore near vs far" preference).
+      if (loDt->getSize() == toDt->getSize()) {
+        SEGDBG("CASTCHK: RETURN true (int->ptr glue, lo ptr same size)");
+        return true;
+      }
+    }
+
+    SEGDBG("CASTCHK: RETURN false (int->ptr glue, lo not compatible; keep cast)");
+    return false;
+  }
+
+  // 3) pointer-to-pointer: elide when redundant
+  if (isPtrType(toDt) && isPtrType(fromDt)) {
+    const auto *toP   = (const TypePointer *)toDt;
+    const auto *fromP = (const TypePointer *)fromDt;
+
+    const Datatype *toBase   = toP->getPtrTo();
+    const Datatype *fromBase = fromP->getPtrTo();
+
+    if (toDt->getSize() == fromDt->getSize() && dtSameShallow(toBase, fromBase)) {
+      SEGDBG("CASTCHK: RETURN true (ptr->ptr same base)");
+      return true;
+    }
+
+    // Your "ignore near vs far" preference, but only when both are pointers.
+    if (toDt->getSize() == fromDt->getSize()) {
+      SEGDBG("CASTCHK: RETURN true (ptr->ptr same size)");
+      return true;
+    }
+  }
+
+  // 4) nested identical casts: (T)(T)x
+  if (in->isWritten()) {
+    const PcodeOp *d = in->getDef();
+    if (d && d->code() == CPUI_CAST && d->getOut()) {
+      Datatype *innerTo = d->getOut()->getHighTypeDefFacing();
+      if (innerTo && dtSameShallow(toDt, innerTo)) {
+        SEGDBG("CASTCHK: RETURN true (nested identical cast)");
+        return true;
+      }
+    }
+  }
+
+  // 5) Special: CAST(CONCATxx(dropHi, lo))
+  // If lo already has the right type, drop the cast.
+  if (isDropHiConcatPiece(in, op)) {
+    const PcodeOp *def = in->getDef();
+    if (def && def->numInput() == 2) {
+      const Varnode *lo = def->getIn(1);
+      if (lo) {
+        const Datatype *loDt = vnReadFacingType(lo, op);
+        if (loDt && isPtrType(toDt) && isPtrType(loDt) && dtSamePtrBaseIgnoreSize(toDt, loDt)) {
+          SEGDBG("CASTCHK: RETURN true (dropHi PIECE, lo same ptr base)");
+          return true;
+        }
+        if (isPtrType(toDt) && loDt && isPtrType(loDt) && toDt->getSize() == loDt->getSize()) {
+          SEGDBG("CASTCHK: RETURN true (dropHi PIECE, lo ptr same size)");
+          return true;
+        }
+      }
+    }
+  }
+
+  // 6) Catch (RECT*)&rc when rc is already the right type
+  if (vnIsAddressOfLocalOfType(in, op, toDt)) {
+    SEGDBG("CASTCHK: RETURN true (addr-of local already matches)");
+    return true;
+  }
+
+  SEGDBG("CASTCHK: RETURN false (no rule matched)");
+  return false;
+}
+
 
 /// The syntax represents the given op using a standard c-language cast.  The data-type
 /// being cast to is obtained from the output variable of the op. The input expression is
 /// also recursively pushed.
 /// \param op is the given PcodeOp
-void PrintC::opTypeCast(const PcodeOp *op)
 
+// ----------------------------------------------------------------------
+// Win16 helper: Mark integer constants inside an int->ptr cast input so they can be
+// printed as segment-relative symbols (e.g., CS:0x0768 -> PARTS::rgscanner).
+// ----------------------------------------------------------------------
+
+void PrintC::markAddrLikeExpr(const Varnode *vn)
+{
+  if (vn == (const Varnode *)0) return;
+
+  if (vn->isConstant()) {
+    addrLikeConsts.insert(vn);
+    return;
+  }
+  if (!vn->isWritten()) return;
+
+  const PcodeOp *def = vn->getDef();
+  if (def == (const PcodeOp *)0) return;
+
+  switch(def->code()) {
+    case CPUI_INT_ADD:
+    case CPUI_INT_SUB:
+    case CPUI_INT_MULT:
+    case CPUI_INT_LEFT:
+    case CPUI_INT_RIGHT:
+    case CPUI_INT_SRIGHT:
+    case CPUI_INT_ZEXT:
+    case CPUI_INT_SEXT:
+    case CPUI_SUBPIECE:
+    case CPUI_PIECE:
+    case CPUI_COPY:
+      for(int4 i=0;i<def->numInput();++i) {
+        markAddrLikeExpr(def->getIn(i));
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+const Symbol *PrintC::lookupSymbolForNearConst(uintb val,int4 sz,const PcodeOp *op) const
+{
+  if (op == (const PcodeOp *)0) return (const Symbol *)0;
+  if (sz != 2) return (const Symbol *)0;      // Win16 near offsets are 16-bit
+  if (val < 0x20) return (const Symbol *)0;   // avoid tiny ints
+  if (glb == (const Architecture *)0) return (const Symbol *)0;
+
+  const Address &pt = op->getAddr();
+  AddrSpace *spc = pt.getSpace();
+  if (spc == (AddrSpace *)0) return (const Symbol *)0;
+
+  uintb full = (pt.getOffset() & 0xffff0000ULL) | (val & 0xffffULL);
+  Address a(spc, full);
+
+	// Use the decompiler's symbol database. Query the global scope for a container
+	// symbol at this address. We only accept the symbol if this constant matches
+	// the *start* of the symbol, so we don't accidentally print an interior offset
+	// as a base symbol.
+	const Scope *gscope = glb->symboltab->getGlobalScope();
+	if (gscope == (const Scope *)0) return (const Symbol *)0;
+	SymbolEntry *entry = gscope->queryContainer(a, 1, pt);
+	if (entry == (SymbolEntry *)0) return (const Symbol *)0;
+	if (entry->getFirst() != a.getOffset()) return (const Symbol *)0;
+	Symbol *sym = entry->getSymbol();
+	if (sym == (Symbol *)0) return (const Symbol *)0;
+	// Filter aggressively.  This lookup runs in an int->ptr cast context, but
+	// we still don't want to substitute code labels (functions/thunks) or
+	// auto-generated placeholder labels.
+	if (sym->getCategory() == Symbol::equate) return (const Symbol *)0;
+	if (sym->getCategory() == Symbol::function_parameter) return (const Symbol *)0;
+	if (sym->getCategory() == Symbol::fake_input) return (const Symbol *)0;
+	if (sym->isNameUndefined()) return (const Symbol *)0;
+	{
+	  const string &nm = sym->getName();
+	  if (nm.size() >= 4 && nm.compare(0, 4, "UNK_") == 0) return (const Symbol *)0;
+	}
+	{
+	  Datatype *sdt = sym->getType();
+	  if (sdt && sdt->getMetatype() == TYPE_CODE) return (const Symbol *)0; // function/code pointer
+	}
+	if (sym->getMapEntry(a) == (SymbolEntry *)0) return (const Symbol *)0;
+	return sym;
+}
+
+
+void PrintC::opTypeCast(const PcodeOp *op)
 {
   Datatype *dt = op->getOut()->getHighTypeDefFacing();
+
+  // SEGDBG("PrintC::opTypeCast: op=%s", segdbg_pcodeop(op).c_str());
+
   if (dt->isPointerToArray()) {
     if (checkAddressOfCast(op)) {
       pushOp(&addressof,op);
@@ -456,12 +979,33 @@ void PrintC::opTypeCast(const PcodeOp *op)
       return;
     }
   }
-  if (!option_nocasts) {
+
+  bool emitCast = !option_nocasts;
+
+  if (emitCast && shouldElideTypeCast(op, dt)) {
+    emitCast = false;
+  }
+
+  // If this is an int->ptr cast (common Win16 segment glue),
+  // mark constants inside the input expression as address-like so they can
+  // be printed as segment-relative symbols (e.g., CS:0x0768 -> rgscanner).
+  addrLikeConsts.clear();
+  {
+    const Varnode *in = op->getIn(0);
+    const Datatype *fromDt = vnReadFacingType(in, op);
+    if (isPtrType(dt) && fromDt && isIntLike(fromDt) && dt->getSize() == fromDt->getSize()) {
+      markAddrLikeExpr(in);
+    }
+  }
+
+  if (emitCast) {
     pushOp(&typecast,op);
     pushType(dt);
   }
   pushVn(op->getIn(0),op,mods);
 }
+
+
 
 /// The syntax represents the given op using a function with one input,
 /// where the function name is not printed. The input expression is simply printed
@@ -1292,6 +1836,7 @@ void PrintC::push_integer(uintb val,int4 sz,bool sign,tagtype tag,
   bool force_unsigned_token;
   bool force_sized_token;
   uint4 displayFormat = 0;
+  SEGDBG("PrintC::push_integer val=0x%0llx sz=%d vn=%s op=%s", val, sz, segdbg_varnode(vn).c_str(), segdbg_pcodeop(op).c_str());
 
   force_unsigned_token = false;
   force_sized_token = false;
@@ -1309,6 +1854,18 @@ void PrintC::push_integer(uintb val,int4 sz,bool sign,tagtype tag,
     force_sized_token = vn->isLongPrint();
     if (displayFormat == 0)	// The symbol's formatting overrides any formatting on the data-type
       displayFormat = high->getType()->getDisplayFormat();
+  }
+
+  // Win16: If this constant is part of an int->ptr cast input we pre-marked,
+  // try to print it as a segment-relative symbol (e.g., CS:0x0768 -> rgscanner).
+  if (vn != (const Varnode *)0 && op != (const PcodeOp *)0 && !vn->isAnnotation() && vn->isConstant()) {
+    if (addrLikeConsts.find(vn) != addrLikeConsts.end()) {
+      const Symbol *sym2 = lookupSymbolForNearConst(val, sz, op);
+      if (sym2 != (const Symbol *)0) {
+        pushAtom(Atom(sym2->getName(),tag,EmitMarkup::var_color,op,vn,val));
+        return;
+      }
+    }
   }
   if (sign && displayFormat != Symbol::force_char) { // Print the constant as signed
     uintb mask = calc_mask(sz);
