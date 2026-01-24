@@ -17,6 +17,7 @@
 
 #include "coreaction.hh"
 #include "flow.hh"
+#include "debug.hh"
 #ifdef CPUI_RULECOMPILE
 #include "rulecompile.hh"
 #endif
@@ -78,6 +79,43 @@ ElementId ELEM_SPACEBASE = ElementId("spacebase",156);
 ElementId ELEM_SPECEXTENSIONS = ElementId("specextensions",157);
 ElementId ELEM_STACKPOINTER = ElementId("stackpointer",158);
 ElementId ELEM_VOLATILE = ElementId("volatile",159);
+
+static bool is_autogen_data_label(const Symbol *sym)
+{
+  if (sym == nullptr) return true;
+
+  // If user explicitly locked the name, never ignore it.
+  // if (sym->isNameLocked()) return false;
+
+  // Decompiler already has a concept of "undefined" names.
+  if (sym->isNameUndefined()) return true;
+
+  const std::string &n = sym->getName();
+
+  // Common Ghidra default/autogen label prefixes (add more as you see them)
+  static const char *kPrefixes[] = {
+    "DAT_",
+    "BYTE_",
+    "WORD_",
+    "DWORD_",
+    "QWORD_",
+    "UINT_",
+    "USHORT_",
+    "SHORT_",
+    "INT_",
+    "LONG_",
+    "PTR_",
+    "OFF_",
+    "UNK_",
+  };
+
+  for (const char *p : kPrefixes) {
+    if (n.rfind(p, 0) == 0) return true;   // startswith
+  }
+
+  return false;
+}
+
 
 /// This builds a list of just the ArchitectureCapability extensions
 void ArchitectureCapability::initialize(void)
@@ -1447,34 +1485,96 @@ void Architecture::resetDefaults(void)
 Address SegmentedResolver::resolve(uintb val,int4 sz,const Address &point,uintb &fullEncoding)
 
 {
+  SEGDBG("SegmentedResolver::resolve(val=0x%0llx, addr=0x%0llx)", val, point.getOffset());
   int4 innersz = segop->getInnerSize();
   if (sz >= 0 && sz <= innersz) { // If -sz- matches the inner size, consider the value a "near" pointer
-  // In this case the address offset is not fully specified
-  // we check if the rest is stored in a context variable
-  // (as with near pointers)
     if (segop->getResolve().space != (AddrSpace *)0) {
-      uintb base = glb->context->getTrackedValue(segop->getResolve(),point);
-      fullEncoding = (base << 8 * innersz) + (val & calc_mask(innersz));
-      vector<uintb> seginput;
-      seginput.push_back(base);
-      seginput.push_back(val);
-      val = segop->execute(seginput);
-      return Address(spc,AddrSpace::addressToByte(val,spc->getWordSize()));
+      uintb base = glb->context->getTrackedValue(segop->getResolve(), point);
+      uintb inner = val & calc_mask(innersz);
+
+      // Default: DS-based encoding/address
+      uintb enc_ds = (base << (8 * innersz)) | inner;
+      Address addr_ds(spc, AddrSpace::addressToByte(enc_ds, spc->getWordSize()));
+
+      // Candidate: CS-based encoding/address (segment of point)
+      uintb pointSeg = (point.getOffset() >> (8 * innersz)) & calc_mask(segop->getBaseSize());
+      uintb enc_cs = (pointSeg << (8 * innersz)) | inner;
+      Address addr_cs(spc, AddrSpace::addressToByte(enc_cs, spc->getWordSize()));
+
+      bool has_cs_symbol = false;
+
+      if (glb->symboltab != (Database *)0) {
+        Scope *gscope = glb->symboltab->getGlobalScope();
+        Scope *scope = glb->symboltab->mapScope(gscope, addr_cs, point);
+        if (scope == (Scope *)0)
+          scope = gscope;
+
+        SymbolEntry *entry = scope->findAddr(addr_cs, point);
+
+        // Offcut support: only try -2 when the *inner/offset* is >= 2, not the packed 32-bit address.
+        if (entry == (SymbolEntry *)0 && inner >= 2)
+          entry = scope->findAddr(addr_cs - 2, point);
+
+        if (entry != (SymbolEntry *)0) {
+          Symbol *sym = entry->getSymbol();
+          if (sym != (Symbol *)0) {
+
+            int2 cat = sym->getCategory();
+            if (cat != Symbol::equate &&
+                cat != Symbol::function_parameter &&
+                cat != Symbol::fake_input) {
+
+              // Treat code-typed symbols as "good" even if they don't "own storage" via getMapEntry().
+              // This fixes cases like FARPROC/function pointers printing as (FARPROC)0x.... instead of a name.
+              Datatype *dt = sym->getType();
+              bool is_code_type = (dt != (Datatype *)0 && dt->getMetatype() == TYPE_CODE);
+
+              if (is_code_type) {
+                if (!sym->isNameUndefined()) {
+                  SEGDBG("SegmentedResolver::resolve(val=0x%0llx, addr=0x%0llx) is_code_type=true symbol=%s",
+                          val, point.getOffset(), segdbg_symbol(sym).c_str());
+                  // has_cs_symbol = true;
+                }
+              }
+              else {
+                // Data-like symbols keep the strict ownership gate
+                if (sym->getMapEntry(addr_cs) != (SymbolEntry *)0) {
+                  // Ignore auto-generated labels like UINT_1108_57aa, DAT_xxx, etc.
+                  if (!is_autogen_data_label(sym)) {
+                    SEGDBG("SegmentedResolver::resolve(val=0x%0llx, addr=0x%0llx) is_code_type=false symbol=%s",
+                          val, point.getOffset(), segdbg_symbol(sym).c_str());
+                    has_cs_symbol = true;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (has_cs_symbol) {
+        fullEncoding = enc_cs;
+        return addr_cs;
+      }
+
+      fullEncoding = enc_ds;
+      return addr_ds;
     }
   }
   else { // For anything else, consider it a "far" pointer
     fullEncoding = val;
     int4 outersz = segop->getBaseSize();
-    uintb base = (val >> 8*innersz) & calc_mask(outersz);
+    uintb base = (val >> 8 * innersz) & calc_mask(outersz);
     val = val & calc_mask(innersz);
     vector<uintb> seginput;
     seginput.push_back(base);
     seginput.push_back(val);
     val = segop->execute(seginput);
-    return Address(spc,AddrSpace::addressToByte(val,spc->getWordSize()));
+    return Address(spc, AddrSpace::addressToByte(val, spc->getWordSize()));
   }
   return Address();		// Return invalid address
 }
+
 
 #ifdef CPUI_STATISTICS
 
