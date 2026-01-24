@@ -17,6 +17,13 @@
 #include "funcdata.hh"
 #include "debug.hh"
 
+#define WIN16_STARS
+// WIN16_STARS
+//   When defined, enable Stars! Win16-specific decompiler output hacks:
+//     - collapse CONCATxx(seg, off) segment-glue to just the low expression
+//     - elide redundant casts produced by segment-glue / partial far pointers
+//   When not defined, keep the stock PrintC behavior for easier debugging.
+
 namespace ghidra {
 
 // Operator tokens for expressions
@@ -668,6 +675,7 @@ void PrintC::opFunc(const PcodeOp *op)
 {
   string nm = op->getOpcode()->getOperatorName(op);
 
+#ifdef WIN16_STARS
   // --- HACK: collapse CONCATxx(seg, off) to just off ---
   if (op->numInput() == 2 && nm.size() >= 6 && nm.compare(0, 6, "CONCAT") == 0) {
     const Varnode *lo = op->getIn(1);
@@ -689,6 +697,7 @@ void PrintC::opFunc(const PcodeOp *op)
     // a small fallback here, but I'd start without it to see your SEGDBG traces.
   }
   // --- end hack ---
+#endif
 
   pushOp(&function_call, op);
   pushAtom(Atom(nm, optoken, EmitMarkup::no_color, op));
@@ -982,9 +991,11 @@ void PrintC::opTypeCast(const PcodeOp *op)
 
   bool emitCast = !option_nocasts;
 
+#ifdef WIN16_STARS
   if (emitCast && shouldElideTypeCast(op, dt)) {
     emitCast = false;
   }
+#endif
 
   // If this is an int->ptr cast (common Win16 segment glue),
   // mark constants inside the input expression as address-like so they can
