@@ -16,6 +16,7 @@
 package ghidra.app.plugin.core.analysis;
 
 import java.math.BigInteger;
+import java.util.Arrays;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -36,6 +37,7 @@ import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceManager;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.Symbol;
+import ghidra.program.model.symbol.SymbolTable;
 import ghidra.program.util.SymbolicPropogator;
 import ghidra.program.util.VarnodeContext;
 import ghidra.util.exception.CancelledException;
@@ -79,36 +81,39 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 			@Override
 			public boolean evaluateContext(VarnodeContext context, Instruction instr) {
 
-			    String mnemonic = instr.getMnemonicString();
-			    if (mnemonic == null) {
-			        return false;
-			    }
+				String mnemonic = instr.getMnemonicString();
+				if (mnemonic == null) {
+					return false;
+				}
 
-			    // --- restore original LEA anchoring behavior ---
-			    if ("LEA".equalsIgnoreCase(mnemonic)) {
-			        Register reg = instr.getRegister(0);
-			        if (reg != null) {
-			            BigInteger val = context.getValue(reg, false);
-			            if (val != null) {
-			                long lval = val.longValue();
-			                Address refAddr = instr.getMinAddress().getNewAddress(lval);
-			                if ((lval > 4096 || lval < 0) && program.getMemory().contains(refAddr)) {
-			                    if (instr.getOperandReferences(1).length == 0) {
-			                        instr.addOperandReference(1, refAddr, RefType.DATA, SourceType.ANALYSIS);
-			                    }
-			                }
-			            }
-			        }
-			        return false; // match original behavior
-			    }
+				// --- restore original LEA anchoring behavior ---
+				if ("LEA".equalsIgnoreCase(mnemonic)) {
+					Register reg = instr.getRegister(0);
+					if (reg != null) {
+						BigInteger val = context.getValue(reg, false);
+						if (val != null) {
+							long lval = val.longValue();
+							Address refAddr = instr.getMinAddress().getNewAddress(lval);
+							if ((lval > 4096 || lval < 0) && program.getMemory().contains(refAddr)) {
+								if (instr.getOperandReferences(1).length == 0) {
+									instr.addOperandReference(1, refAddr, RefType.DATA, SourceType.ANALYSIS);
+								}
+							}
+						}
+					}
+					return false; // match original behavior
+				}
 
-			    // --- your added MOV-based heuristic(s) ---
-			    if ("MOV".equalsIgnoreCase(mnemonic)) {
-			        // run this *only* when it's MOV DX, CS (your helper already gates this)
-			        detectCsFarPtrReturnAndAnchorBase(program, instr);
-			    }
+				// --- your added MOV-based heuristic(s) ---
+				if ("MOV".equalsIgnoreCase(mnemonic)) {
+					// run this *only* when it's MOV DX, CS (your helper already gates this)
+					detectCsFarPtrReturnAndAnchorBase(program, instr);
 
-			    return false; // match original behavior
+					// attempt to detect DS symbols that are indexed like rgplayersdhefs[iPlr]
+					anchorIndexedDsTableBase(context, program, instr);
+				}
+
+				return false; // match original behavior
 			}
 
 			@Override
@@ -116,15 +121,16 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 					int size, DataType dataType, RefType refType) {
 
 				// Suppress bogus DS:data refs for "segment literal" patterns like:
-				//   MOV DX, imm16   (imm16 == current CS)
-				//   PUSH DX
+				// MOV DX, imm16 (imm16 == current CS)
+				// PUSH DX
 				//
 				// These are commonly used to build far pointers / call frames and should not
 				// create a DS:imm16 DATA reference (which spawns DAT_1120_xxxx symbols).
 				if (instr != null && "MOV".equalsIgnoreCase(instr.getMnemonicString())) {
 					// Must be writing a 16-bit general register (usually DX)
-					if (writesRegisterNamed(instr, "DX") || writesRegisterNamed(instr, "AX") || writesRegisterNamed(instr, "CX")
-							|| writesRegisterNamed(instr, "BX") || writesRegisterNamed(instr, "SI") || writesRegisterNamed(instr, "DI")) {
+					if (writesRegisterNamed(instr, "DX") || writesRegisterNamed(instr, "AX")
+							|| writesRegisterNamed(instr, "CX") || writesRegisterNamed(instr, "BX")
+							|| writesRegisterNamed(instr, "SI") || writesRegisterNamed(instr, "DI")) {
 
 						Scalar sc = findFirstImm16Scalar(instr);
 						if (sc != null) {
@@ -142,15 +148,23 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 											if (o instanceof Register) {
 												Register r = (Register) o;
 												// If MOV wrote DX and next PUSH reads DX (common), suppress
-												if ((writesRegisterNamed(instr, "DX") && "DX".equalsIgnoreCase(r.getName())) ||
-													(writesRegisterNamed(instr, "AX") && "AX".equalsIgnoreCase(r.getName())) ||
-													(writesRegisterNamed(instr, "CX") && "CX".equalsIgnoreCase(r.getName())) ||
-													(writesRegisterNamed(instr, "BX") && "BX".equalsIgnoreCase(r.getName())) ||
-													(writesRegisterNamed(instr, "SI") && "SI".equalsIgnoreCase(r.getName())) ||
-													(writesRegisterNamed(instr, "DI") && "DI".equalsIgnoreCase(r.getName()))) {
+												if ((writesRegisterNamed(instr, "DX")
+														&& "DX".equalsIgnoreCase(r.getName()))
+														|| (writesRegisterNamed(instr, "AX")
+																&& "AX".equalsIgnoreCase(r.getName()))
+														|| (writesRegisterNamed(instr, "CX")
+																&& "CX".equalsIgnoreCase(r.getName()))
+														|| (writesRegisterNamed(instr, "BX")
+																&& "BX".equalsIgnoreCase(r.getName()))
+														|| (writesRegisterNamed(instr, "SI")
+																&& "SI".equalsIgnoreCase(r.getName()))
+														|| (writesRegisterNamed(instr, "DI")
+																&& "DI".equalsIgnoreCase(r.getName()))) {
 
-													log.debug("CP-SUPPRESS: {} suppress DS ref for segment literal imm16=0x{} (CS=0x{})",
-															instr.getAddress(), Long.toHexString(imm16), Long.toHexString(csSeg));
+													log.debug(
+															"CP-SUPPRESS: {} suppress DS ref for segment literal imm16=0x{} (CS=0x{})",
+															instr.getAddress(), Long.toHexString(imm16),
+															Long.toHexString(csSeg));
 													return false; // don't create the reference
 												}
 											}
@@ -207,11 +221,12 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 					return;
 				}
 
-				log.debug("CS-FARPTR: {} base candidate MOV CX,imm16 at {} imm=0x{}",
-						movDxCs.getAddress(), movCxImm.getAddress(), Long.toHexString(baseOff));
+				log.debug("CS-FARPTR: {} base candidate MOV CX,imm16 at {} imm=0x{}", movDxCs.getAddress(),
+						movCxImm.getAddress(), Long.toHexString(baseOff));
 
-				// If baseOff==0, do NOT try to anchor a symbol. This is often "offset-only" farptr build:
-				//   MOV CX,0; MOV DX,CS; ADD CX,AX; MOV [..],CX; MOV [..+2],DX
+				// If baseOff==0, do NOT try to anchor a symbol. This is often "offset-only"
+				// farptr build:
+				// MOV CX,0; MOV DX,CS; ADD CX,AX; MOV [..],CX; MOV [..+2],DX
 				if (baseOff == 0) {
 					log.debug("CS-FARPTR: {} baseOff is 0; skipping anchor", movDxCs.getAddress());
 					return;
@@ -239,7 +254,8 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 					}
 
 					// Hard stops only
-					if ("CALL".equalsIgnoreCase(mnem) || "RET".equalsIgnoreCase(mnem) || "RETF".equalsIgnoreCase(mnem)) {
+					if ("CALL".equalsIgnoreCase(mnem) || "RET".equalsIgnoreCase(mnem)
+							|| "RETF".equalsIgnoreCase(mnem)) {
 						break;
 					}
 
@@ -248,8 +264,7 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 							sawAddCxAx = true;
 							log.debug("CS-FARPTR: {} saw ADD CX,AX at {}", movDxCs.getAddress(), cur.getAddress());
 						}
-					}
-					else if ("MOV".equalsIgnoreCase(mnem)) {
+					} else if ("MOV".equalsIgnoreCase(mnem)) {
 						// return-style: MOV AX,CX
 						if (writesRegisterNamed(cur, "AX") && readsRegisterNamed(cur, "CX")) {
 							sawMovAxCx = true;
@@ -266,28 +281,28 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 							if (storeBase != null && storeBase.equals(ms.baseReg)) {
 								if ("CX".equalsIgnoreCase(ms.srcRegName)) {
 									storeCxDisp = ms.disp;
-								}
-								else if ("DX".equalsIgnoreCase(ms.srcRegName)) {
+								} else if ("DX".equalsIgnoreCase(ms.srcRegName)) {
 									storeDxDisp = ms.disp;
 								}
-								if (storeCxDisp != null && storeDxDisp != null && Math.abs(storeCxDisp - storeDxDisp) == 2) {
+								if (storeCxDisp != null && storeDxDisp != null
+										&& Math.abs(storeCxDisp - storeDxDisp) == 2) {
 									sawStorePair = true;
 									log.debug("CS-FARPTR: {} saw store pair base={} cxDisp={} dxDisp={}",
 											movDxCs.getAddress(), storeBase.getName(), storeCxDisp, storeDxDisp);
 								}
 							}
 						}
-					}
-					else if ("XCHG".equalsIgnoreCase(mnem)) {
+					} else if ("XCHG".equalsIgnoreCase(mnem)) {
 						// return-style alternative: XCHG AX,CX
-						if ((writesRegisterNamed(cur, "AX") && readsRegisterNamed(cur, "CX")) &&
-							(writesRegisterNamed(cur, "CX") && readsRegisterNamed(cur, "AX"))) {
+						if ((writesRegisterNamed(cur, "AX") && readsRegisterNamed(cur, "CX"))
+								&& (writesRegisterNamed(cur, "CX") && readsRegisterNamed(cur, "AX"))) {
 							sawMovAxCx = true;
 							log.debug("CS-FARPTR: {} saw XCHG AX,CX at {}", movDxCs.getAddress(), cur.getAddress());
 						}
 					}
 
-					// Once we know it's a constructed offset and we have either return-style or store-style, stop scanning.
+					// Once we know it's a constructed offset and we have either return-style or
+					// store-style, stop scanning.
 					if (sawAddCxAx && (sawMovAxCx || sawStorePair)) {
 						break;
 					}
@@ -300,8 +315,8 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 				// ---- resolve address ----
 				Address target = toSegOff(program, movDxCs.getMinAddress(), seg, baseOff);
 				if (target == null) {
-					log.debug("CS-FARPTR: {} could not form target CS:{}, seg={}",
-							movDxCs.getAddress(), Long.toHexString(baseOff), Long.toHexString(seg));
+					log.debug("CS-FARPTR: {} could not form target CS:{}, seg={}", movDxCs.getAddress(),
+							Long.toHexString(baseOff), Long.toHexString(seg));
 					return;
 				}
 
@@ -313,12 +328,140 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 					return;
 				}
 
-				log.debug("CS-FARPTR: {} SUCCESS anchor base {} -> {}",
-						movDxCs.getAddress(), movCxImm.getAddress(), sym.getAddress());
+				log.debug("CS-FARPTR: {} SUCCESS anchor base {} -> {}", movDxCs.getAddress(), movCxImm.getAddress(),
+						sym.getAddress());
 
 				addOrPromoteOperandDataRef(program, movCxImm, movCxImmOpIndex, sym.getAddress());
 			}
-			
+
+			private void anchorIndexedDsTableBase(VarnodeContext context, Program program, Instruction instr) {
+				if (program == null || instr == null || context == null)
+					return;
+				if (!"MOV".equalsIgnoreCase(instr.getMnemonicString()))
+					return;
+
+				// We want: MOV reg16, [baseReg + disp16]
+				Object[] res = instr.getResultObjects();
+				if (res == null || res.length == 0 || !(res[0] instanceof Register))
+					return;
+
+				if (instr.getNumOperands() < 2)
+					return;
+
+				Object[] srcObjs = instr.getOpObjects(1);
+				if (srcObjs == null)
+					return;
+
+				Register base = null;
+				Scalar dispSc = null;
+
+				for (Object o : srcObjs) {
+					if (o instanceof Register) {
+						Register r = (Register) o;
+						String rn = r.getName();
+						if ("BX".equalsIgnoreCase(rn) || "SI".equalsIgnoreCase(rn) || "DI".equalsIgnoreCase(rn)) {
+							base = r;
+						}
+					} else if (o instanceof Scalar) {
+						Scalar sc = (Scalar) o;
+						if (sc.bitLength() <= 16)
+							dispSc = sc;
+					}
+				}
+
+				if (base == null || dispSc == null)
+					return;
+
+				// Don’t stomp existing refs on the primary instruction
+				if (instr.getOperandReferences(1).length != 0)
+					return;
+
+				// Determine DS from context
+				Register ds = program.getRegister("DS");
+				if (ds == null)
+					return;
+
+				BigInteger dsVal = context.getValue(ds, false);
+				if (dsVal == null)
+					return;
+
+				long seg = dsVal.longValue() & 0xffffL;
+				long off1 = dispSc.getUnsignedValue() & 0xffffL;
+
+				Address baseAddr1 = toSegOff(program, instr.getMinAddress(), seg, off1);
+				if (baseAddr1 == null)
+					return;
+
+				Symbol sym = findDefinedDataSymbol(program, baseAddr1);
+				if (sym == null)
+					return;
+
+				log.debug("IDX-ANCHOR: first ok @ {} base={} off1=0x{} sym={}", instr.getAddress(), base.getName(),
+						Long.toHexString(off1), sym.getName());
+
+				// Anchor the first operand: [base + sym]
+				instr.addOperandReference(1, sym.getAddress(), RefType.DATA, SourceType.ANALYSIS);
+
+				// ---- paired +2 access (segment half of far pointer) ----
+				Instruction next = instr.getNext();
+				if (next == null)
+					return;
+				if (!"MOV".equalsIgnoreCase(next.getMnemonicString()))
+					return;
+				if (next.getNumOperands() < 2)
+					return;
+
+				if (!writesRegisterNamed(next, "DX"))
+					return;
+
+				Object[] nextSrcObjs = next.getOpObjects(1);
+				if (nextSrcObjs == null)
+					return;
+
+				Register base2 = null;
+				Scalar dispSc2 = null;
+
+				for (Object o : nextSrcObjs) {
+					if (o instanceof Register) {
+						Register r = (Register) o;
+						if (r.equals(base))
+							base2 = r;
+					} else if (o instanceof Scalar) {
+						Scalar sc = (Scalar) o;
+						if (sc.bitLength() <= 16)
+							dispSc2 = sc;
+					}
+				}
+
+				if (base2 == null || dispSc2 == null)
+					return;
+
+				long off2 = dispSc2.getUnsignedValue() & 0xffffL;
+				if (off2 != ((off1 + 2) & 0xffffL))
+					return;
+
+				// Optional: sanity-check address exists
+				Address baseAddr2 = toSegOff(program, next.getMinAddress(), seg, off2);
+				if (baseAddr2 == null)
+					return;
+
+				log.debug("IDX-ANCHOR: pairing ok @ {} -> {}+2 (no label)", next.getAddress(), sym.getName());
+
+				// If something already created an ANALYSIS ref on the next operand, delete it
+				// so ours wins.
+				ReferenceManager rm = program.getReferenceManager();
+				for (Reference r : next.getOperandReferences(1)) {
+					if (r != null && r.getSource() == SourceType.ANALYSIS) {
+						rm.delete(r);
+					}
+				}
+
+				// Anchor the second operand to the SAME base symbol (do not create sym+2
+				// labels).
+				// The listing may show "=> sym" or "sym+0x2"; but no new global symbols are
+				// created.
+				next.addOperandReference(1, sym.getAddress(), RefType.DATA, SourceType.ANALYSIS);
+			}
 
 			private MemStore parseSimpleWordStoreFromReg(Instruction instr) {
 				if (instr == null) {
@@ -353,8 +496,7 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 						if (base == null) {
 							base = (Register) o;
 						}
-					}
-					else if (o instanceof Scalar) {
+					} else if (o instanceof Scalar) {
 						disp = (int) ((Scalar) o).getSignedValue();
 					}
 				}
@@ -366,7 +508,6 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 				String src = srcIsCx ? "CX" : "DX";
 				return new MemStore(base, disp, src);
 			}
-
 
 			private Instruction findPrevMovCxImm16(Instruction start, int maxInstrs) {
 				Instruction cur = start;
@@ -439,25 +580,25 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 			}
 
 			private int findOperandIndexContainingImm16ScalarValue(Instruction instr, long imm16Value) {
-			    long want = imm16Value & 0xffffL;
-			    for (int op = 0; op < instr.getNumOperands(); op++) {
-			        Object[] objs = instr.getOpObjects(op);
-			        if (objs == null) continue;
-			        for (Object o : objs) {
-			            if (o instanceof Scalar) {
-			                Scalar sc = (Scalar)o;
-			                if (sc.bitLength() <= 16) {
-			                    long got = sc.getUnsignedValue() & 0xffffL;
-			                    if (got == want) {
-			                        return op;
-			                    }
-			                }
-			            }
-			        }
-			    }
-			    return -1;
+				long want = imm16Value & 0xffffL;
+				for (int op = 0; op < instr.getNumOperands(); op++) {
+					Object[] objs = instr.getOpObjects(op);
+					if (objs == null)
+						continue;
+					for (Object o : objs) {
+						if (o instanceof Scalar) {
+							Scalar sc = (Scalar) o;
+							if (sc.bitLength() <= 16) {
+								long got = sc.getUnsignedValue() & 0xffffL;
+								if (got == want) {
+									return op;
+								}
+							}
+						}
+					}
+				}
+				return -1;
 			}
-
 
 			/**
 			 * Return the instruction's segment (high 16 bits of the address offset), or -1
@@ -565,7 +706,8 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 
 				Reference match = null;
 				for (Reference r : refs) {
-					if (r != null && to.equals(r.getToAddress()) && r.getReferenceType() != null && r.getReferenceType().isData()) {
+					if (r != null && to.equals(r.getToAddress()) && r.getReferenceType() != null
+							&& r.getReferenceType().isData()) {
 						match = r;
 						break;
 					}
@@ -576,7 +718,8 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 					instr.addOperandReference(opIndex, to, RefType.DATA, SourceType.ANALYSIS);
 					refs = instr.getOperandReferences(opIndex);
 					for (Reference r : refs) {
-						if (r != null && to.equals(r.getToAddress()) && r.getReferenceType() != null && r.getReferenceType().isData()) {
+						if (r != null && to.equals(r.getToAddress()) && r.getReferenceType() != null
+								&& r.getReferenceType().isData()) {
 							match = r;
 							break;
 						}
@@ -588,13 +731,14 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 				}
 
 				// Make this the primary operand ref.
-				// Demote any other remaining ANALYSIS data refs (there shouldn't be any now, but keep it sane).
+				// Demote any other remaining ANALYSIS data refs (there shouldn't be any now,
+				// but keep it sane).
 				for (Reference r : refs) {
 					if (r == null || r == match) {
 						continue;
 					}
-					if (r.isPrimary() && r.getSource() == SourceType.ANALYSIS &&
-						r.getReferenceType() != null && r.getReferenceType().isData()) {
+					if (r.isPrimary() && r.getSource() == SourceType.ANALYSIS && r.getReferenceType() != null
+							&& r.getReferenceType().isData()) {
 						rm.setPrimary(r, false);
 					}
 				}

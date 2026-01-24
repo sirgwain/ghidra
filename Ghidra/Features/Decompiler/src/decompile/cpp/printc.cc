@@ -930,49 +930,104 @@ void PrintC::markAddrLikeExpr(const Varnode *vn)
   }
 }
 
-const Symbol *PrintC::lookupSymbolForNearConst(uintb val,int4 sz,const PcodeOp *op) const
+// Lookup a symbol for a const addend. Allow interior references and return the addend
+// from the symbol base. This lets push_integer print "sym+0x2" without requiring a
+// real label at sym+2.
+static bool lookupSymbolForNearConstAddend(const Architecture *glb,uintb val,int4 sz,const PcodeOp *op,
+                                           const Symbol *&symOut,int64_t &addendOut)
 {
-  if (op == (const PcodeOp *)0) return (const Symbol *)0;
-  if (sz != 2) return (const Symbol *)0;      // Win16 near offsets are 16-bit
-  if (val < 0x20) return (const Symbol *)0;   // avoid tiny ints
-  if (glb == (const Architecture *)0) return (const Symbol *)0;
+  symOut = (const Symbol *)0;
+  addendOut = 0;
+  if (!op || !glb) return false;
+  if (sz != 2) return false;                 // Win16 near offsets are 16-bit
+  if (val < 0x20) return false;              // avoid tiny ints
 
   const Address &pt = op->getAddr();
   AddrSpace *spc = pt.getSpace();
-  if (spc == (AddrSpace *)0) return (const Symbol *)0;
+  if (!spc) return false;
 
-  uintb full = (pt.getOffset() & 0xffff0000ULL) | (val & 0xffffULL);
-  Address a(spc, full);
+  const Scope *gscope = glb->symboltab->getGlobalScope();
+  if (!gscope) return false;
 
-	// Use the decompiler's symbol database. Query the global scope for a container
-	// symbol at this address. We only accept the symbol if this constant matches
-	// the *start* of the symbol, so we don't accidentally print an interior offset
-	// as a base symbol.
-	const Scope *gscope = glb->symboltab->getGlobalScope();
-	if (gscope == (const Scope *)0) return (const Symbol *)0;
-	SymbolEntry *entry = gscope->queryContainer(a, 1, pt);
-	if (entry == (SymbolEntry *)0) return (const Symbol *)0;
-	if (entry->getFirst() != a.getOffset()) return (const Symbol *)0;
-	Symbol *sym = entry->getSymbol();
-	if (sym == (Symbol *)0) return (const Symbol *)0;
-	// Filter aggressively.  This lookup runs in an int->ptr cast context, but
-	// we still don't want to substitute code labels (functions/thunks) or
-	// auto-generated placeholder labels.
-	if (sym->getCategory() == Symbol::equate) return (const Symbol *)0;
-	if (sym->getCategory() == Symbol::function_parameter) return (const Symbol *)0;
-	if (sym->getCategory() == Symbol::fake_input) return (const Symbol *)0;
-	if (sym->isNameUndefined()) return (const Symbol *)0;
-	{
-	  const string &nm = sym->getName();
-	  if (nm.size() >= 4 && nm.compare(0, 4, "UNK_") == 0) return (const Symbol *)0;
-	}
-	{
-	  Datatype *sdt = sym->getType();
-	  if (sdt && sdt->getMetatype() == TYPE_CODE) return (const Symbol *)0; // function/code pointer
-	}
-	if (sym->getMapEntry(a) == (SymbolEntry *)0) return (const Symbol *)0;
-	return sym;
+  auto filterSym = [&](Symbol *sym, const Address &a) -> bool {
+    if (!sym) return false;
+    if (sym->getCategory() == Symbol::equate) return false;
+    if (sym->getCategory() == Symbol::function_parameter) return false;
+    if (sym->getCategory() == Symbol::fake_input) return false;
+    if (sym->isNameUndefined()) return false;
+    {
+      const string &nm = sym->getName();
+      if (nm.size() >= 4 && nm.compare(0, 4, "UNK_") == 0) return false;
+    }
+    {
+      Datatype *sdt = sym->getType();
+      if (sdt && sdt->getMetatype() == TYPE_CODE) return false; // function/code pointer
+    }
+    // Keep the old "must map exactly here" safety when we do an exact match,
+    // but NOTE: for interior (+2) we may not have a map entry at 'a'.
+    return true;
+  };
+
+  auto tryExact = [&](uint16_t seg16) -> bool {
+    uintb full = ((uintb)seg16 << 16) | (val & 0xffffULL);
+    Address a(spc, full);
+
+    SymbolEntry *entry = gscope->queryContainer(a, 1, pt);
+    if (!entry) return false;
+
+    // EXACT match only (old behavior): constant must equal the start of the symbol
+    if (entry->getFirst() != a.getOffset()) return false;
+
+    Symbol *sym = entry->getSymbol();
+    if (!filterSym(sym, a)) return false;
+
+    // Preserve the old safety gate for exact matches
+    if (sym->getMapEntry(a) == (SymbolEntry *)0) return false;
+
+    symOut = sym;
+    addendOut = 0;
+    return true;
+  };
+
+  auto tryDsPlus2 = [&](uint16_t seg16) -> bool {
+    uintb full = ((uintb)seg16 << 16) | (val & 0xffffULL);
+    Address a(spc, full);
+
+    SymbolEntry *entry = gscope->queryContainer(a, 1, pt);
+    if (!entry) return false;
+
+    Symbol *sym = entry->getSymbol();
+    if (!filterSym(sym, a)) return false;
+
+    uintb base = entry->getFirst();          // container start
+    uintb cur  = a.getOffset();
+    if (cur < base) return false;
+
+    int64_t addend = (int64_t)(cur - base);
+
+    // Your rule: DS symbolization is ONLY allowed for +0/+2 cases
+    // (to cover 32-bit / far-pointer word halves)
+    if (!(addend == 0 || addend == 2)) return false;
+
+    symOut = sym;
+    addendOut = addend;
+    return true;
+  };
+
+  // 1) Prefer point segment (CS) EXACT match (old behavior)
+  uint16_t pointSeg = (uint16_t)((pt.getOffset() >> 16) & 0xffff);
+  if (tryExact(pointSeg)) return true;
+
+  // 2) If pointSeg failed, try DS EXACT match (still safe)
+  const uint16_t DS_SEG = 0x1120;
+  if (tryExact(DS_SEG)) return true;
+
+  // 3) Finally, DS interior match ONLY for +2 (or +0) to cover split words
+  if (tryDsPlus2(DS_SEG)) return true;
+
+  return false;
 }
+
 
 
 void PrintC::opTypeCast(const PcodeOp *op)
@@ -1847,7 +1902,7 @@ void PrintC::push_integer(uintb val,int4 sz,bool sign,tagtype tag,
   bool force_unsigned_token;
   bool force_sized_token;
   uint4 displayFormat = 0;
-  SEGDBG("PrintC::push_integer val=0x%0llx sz=%d vn=%s op=%s", val, sz, segdbg_varnode(vn).c_str(), segdbg_pcodeop(op).c_str());
+  SEGDBG("PrintC::push_integer 0x%0llx val=0x%0llx sz=%d", op->getAddr().getOffset(), val, sz);
 
   force_unsigned_token = false;
   force_sized_token = false;
@@ -1871,9 +1926,19 @@ void PrintC::push_integer(uintb val,int4 sz,bool sign,tagtype tag,
   // try to print it as a segment-relative symbol (e.g., CS:0x0768 -> rgscanner).
   if (vn != (const Varnode *)0 && op != (const PcodeOp *)0 && !vn->isAnnotation() && vn->isConstant()) {
     if (addrLikeConsts.find(vn) != addrLikeConsts.end()) {
-      const Symbol *sym2 = lookupSymbolForNearConst(val, sz, op);
-      if (sym2 != (const Symbol *)0) {
-        pushAtom(Atom(sym2->getName(),tag,EmitMarkup::var_color,op,vn,val));
+      const Symbol *sym2 = (const Symbol *)0;
+      int64_t addend = 0;
+      SEGDBG("PrintC::push_integer 0x%0llx found addrLikeConst", op->getAddr().getOffset());
+      if (lookupSymbolForNearConstAddend(glb, val, sz, op, sym2, addend) && sym2 != (const Symbol *)0) {
+        ostringstream tt;
+        tt << sym2->getName();
+        if (addend != 0) {
+          tt << ((addend >= 0) ? "+" : "-");
+          uintb mag = (uintb)((addend >= 0) ? addend : -addend);
+          tt << "0x" << hex << mag;
+        }
+        SEGDBG("PrintC::push_integer 0x%0llx pushAtom", op->getAddr().getOffset());
+        pushAtom(Atom(tt.str(),tag,EmitMarkup::global_color,op,vn,val));
         return;
       }
     }

@@ -164,7 +164,6 @@ protected:
   mutable std::unordered_set<const Varnode *> addrLikeConsts;
 
   void markAddrLikeExpr(const Varnode *vn);
-  const Symbol *lookupSymbolForNearConst(uintb val,int4 sz,const PcodeOp *op) const;
 
   // Routines that are specific to C/C++
   void buildTypeStack(const Datatype *ct,vector<const Datatype *> &typestack);	///< Prepare to push components of a data-type declaration
