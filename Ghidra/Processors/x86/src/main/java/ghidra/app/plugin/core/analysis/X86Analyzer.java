@@ -340,12 +340,15 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 				if (!"MOV".equalsIgnoreCase(instr.getMnemonicString()))
 					return;
 
-				// We want: MOV reg16, [baseReg + disp16]
-				Object[] res = instr.getResultObjects();
-				if (res == null || res.length == 0 || !(res[0] instanceof Register))
+				if (instr.getNumOperands() < 2)
 					return;
 
-				if (instr.getNumOperands() < 2)
+				// NEW: if mem operand is ES:/CS:/SS: overridden, don't treat it as DS global
+				if (operandHasNonDsSegmentOverride(instr, 1))
+					return;
+
+				Object[] res = instr.getResultObjects();
+				if (res == null || res.length == 0 || !(res[0] instanceof Register))
 					return;
 
 				Object[] srcObjs = instr.getOpObjects(1);
@@ -371,12 +374,9 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 
 				if (base == null || dispSc == null)
 					return;
-
-				// Don’t stomp existing refs on the primary instruction
 				if (instr.getOperandReferences(1).length != 0)
 					return;
 
-				// Determine DS from context
 				Register ds = program.getRegister("DS");
 				if (ds == null)
 					return;
@@ -396,10 +396,6 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 				if (sym == null)
 					return;
 
-				log.debug("IDX-ANCHOR: first ok @ {} base={} off1=0x{} sym={}", instr.getAddress(), base.getName(),
-						Long.toHexString(off1), sym.getName());
-
-				// Anchor the first operand: [base + sym]
 				instr.addOperandReference(1, sym.getAddress(), RefType.DATA, SourceType.ANALYSIS);
 
 				// ---- paired +2 access (segment half of far pointer) ----
@@ -409,6 +405,10 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 				if (!"MOV".equalsIgnoreCase(next.getMnemonicString()))
 					return;
 				if (next.getNumOperands() < 2)
+					return;
+
+				// NEW: also skip if paired access is ES:/CS:/SS: overridden
+				if (operandHasNonDsSegmentOverride(next, 1))
 					return;
 
 				if (!writesRegisterNamed(next, "DX"))
@@ -440,27 +440,35 @@ public class X86Analyzer extends ConstantPropagationAnalyzer {
 				if (off2 != ((off1 + 2) & 0xffffL))
 					return;
 
-				// Optional: sanity-check address exists
 				Address baseAddr2 = toSegOff(program, next.getMinAddress(), seg, off2);
 				if (baseAddr2 == null)
 					return;
 
-				log.debug("IDX-ANCHOR: pairing ok @ {} -> {}+2 (no label)", next.getAddress(), sym.getName());
-
-				// If something already created an ANALYSIS ref on the next operand, delete it
-				// so ours wins.
 				ReferenceManager rm = program.getReferenceManager();
 				for (Reference r : next.getOperandReferences(1)) {
-					if (r != null && r.getSource() == SourceType.ANALYSIS) {
+					if (r != null && r.getSource() == SourceType.ANALYSIS)
 						rm.delete(r);
-					}
 				}
 
-				// Anchor the second operand to the SAME base symbol (do not create sym+2
-				// labels).
-				// The listing may show "=> sym" or "sym+0x2"; but no new global symbols are
-				// created.
 				next.addOperandReference(1, sym.getAddress(), RefType.DATA, SourceType.ANALYSIS);
+			}
+
+			private boolean operandHasNonDsSegmentOverride(Instruction instr, int opIndex) {
+				Object[] objs = instr.getOpObjects(opIndex);
+				if (objs == null)
+					return false;
+
+				for (Object o : objs) {
+					if (o instanceof Register) {
+						String rn = ((Register) o).getName();
+						if ("ES".equalsIgnoreCase(rn) || "CS".equalsIgnoreCase(rn) || "SS".equalsIgnoreCase(rn)) {
+							// Treat any explicit ES/CS/SS as a segment override => not a DS global access
+							return true;
+						}
+						// If DS appears explicitly, that's fine (rare in syntax, but safe)
+					}
+				}
+				return false;
 			}
 
 			private MemStore parseSimpleWordStoreFromReg(Instruction instr) {
