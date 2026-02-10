@@ -733,22 +733,22 @@ bool PrintC::shouldElideTypeCast(const PcodeOp *op, Datatype *toDt) const
   // 2) if already same type, cast is redundant
   if (dtSameShallow(toDt, fromDt)) return true;
 
-  SEGDBG("CASTCHK: op=%s", segdbg_pcodeop(op).c_str());
-  SEGDBG("CASTCHK: toDt=%s", segdbg_datatype(toDt).c_str());
-  SEGDBG("CASTCHK: fromDt=%s", segdbg_datatype(fromDt).c_str());
-  SEGDBG("CASTCHK: in=\n%s\n", segdbg_varnode(in).c_str());
+  // SEGDBG("CASTCHK: op=%s", segdbg_pcodeop(op).c_str());
+  // SEGDBG("CASTCHK: toDt=%s", segdbg_datatype(toDt).c_str());
+  // SEGDBG("CASTCHK: fromDt=%s", segdbg_datatype(fromDt).c_str());
+  // SEGDBG("CASTCHK: in=\n%s\n", segdbg_varnode(in).c_str());
 
   if (in->isWritten()) {
-    SEGDBG("CASTCHK: in.def=%s", segdbg_pcodeop(in->getDef()).c_str());
+    // SEGDBG("CASTCHK: in.def=%s", segdbg_pcodeop(in->getDef()).c_str());
   }
 
   // 2.5) If the varnode's *defined* type already matches the cast target,
   // the cast is redundant even if the read-facing type degrades to ulong.
   {
     const Datatype *defDt = vnDefFacingType(in);
-    SEGDBG("CASTCHK: defDt=%s", segdbg_datatype(defDt).c_str());
+    // SEGDBG("CASTCHK: defDt=%s", segdbg_datatype(defDt).c_str());
     if (defDt && dtSameShallow(toDt, defDt)) {
-      SEGDBG("CASTCHK: RETURN true (def-facing matches toDt)");
+      // SEGDBG("CASTCHK: RETURN true (def-facing matches toDt)");
       return true;
     }
   }
@@ -756,7 +756,7 @@ bool PrintC::shouldElideTypeCast(const PcodeOp *op, Datatype *toDt) const
   // ---- HARD GUARD: keep int->ptr casts unless we can prove the cast is redundant ----
   // This prevents losing important casts like (SHDEF *)(pt.y*0x93 + 0x3f00).
   if (isPtrType(toDt) && isIntLike(fromDt)) {
-    SEGDBG("CASTCHK: int->ptr guard hit");
+    // SEGDBG("CASTCHK: int->ptr guard hit");
 
     // We only elide when the integer is really the output of a droppable PIECE/CONCAT
     // (segment glue), AND collapsing it would leave a low expression that is already
@@ -764,7 +764,7 @@ bool PrintC::shouldElideTypeCast(const PcodeOp *op, Datatype *toDt) const
     const Varnode *pieceOut = nullptr;
     if (isDropHiConcatPiece(in, op)) {
       pieceOut = in;
-      SEGDBG("CASTCHK: isDropHiConcatPiece(in)=1");
+      // SEGDBG("CASTCHK: isDropHiConcatPiece(in)=1");
     }
     else {
       // Peel trivial CAST/SUBPIECE noise to find a PIECE directly.
@@ -773,27 +773,27 @@ bool PrintC::shouldElideTypeCast(const PcodeOp *op, Datatype *toDt) const
         const PcodeOp *d = peeled->getDef();
         if (d && d->code() == CPUI_PIECE && isDropHiConcatPiece(peeled, op)) {
           pieceOut = peeled;
-          SEGDBG("CASTCHK: isDropHiConcatPiece(peeled)=1");
+          // SEGDBG("CASTCHK: isDropHiConcatPiece(peeled)=1");
         }
       }
     }
 
     if (!pieceOut) {
-      SEGDBG("CASTCHK: RETURN false (plain int->ptr)");
+      // SEGDBG("CASTCHK: RETURN false (plain int->ptr)");
       return false;
     }
 
     const PcodeOp *def = pieceOut->getDef();
-    SEGDBG("CASTCHK: pieceOut.def=%s", segdbg_pcodeop(def).c_str());
+    // SEGDBG("CASTCHK: pieceOut.def=%s", segdbg_pcodeop(def).c_str());
     const Varnode *lo = (def && def->numInput() == 2) ? def->getIn(1) : nullptr;
     if (!lo) {
-      SEGDBG("CASTCHK: RETURN false (piece has no lo)");
+      // SEGDBG("CASTCHK: RETURN false (piece has no lo)");
       return false;
     }
 
-    SEGDBG("CASTCHK: piece.lo=\n%s\n", segdbg_varnode(lo).c_str());
+    // SEGDBG("CASTCHK: piece.lo=\n%s\n", segdbg_varnode(lo).c_str());
     const Datatype *loDt = vnReadFacingType(lo, op);
-    SEGDBG("CASTCHK: piece.loDt=%s", segdbg_datatype(loDt).c_str());
+    // SEGDBG("CASTCHK: piece.loDt=%s", segdbg_datatype(loDt).c_str());
 
     // Key rule for your workflow:
     //   If collapsing the PIECE leaves behind a low expression already typed as the
@@ -803,23 +803,23 @@ bool PrintC::shouldElideTypeCast(const PcodeOp *op, Datatype *toDt) const
     // "partial" varnode (tied to the 4-byte symbol). The Datatype can still be T*.
     // We must therefore compare pointer *base* and ignore pointer-width mismatches here.
     if (loDt && isPtrType(loDt)) {
-      SEGDBG("CASTCHK: glue lo is ptr; loDt.size=%d toDt.size=%d lo.vn.size=%d",
-             (int)loDt->getSize(), (int)toDt->getSize(), (int)lo->getSize());
+      // SEGDBG("CASTCHK: glue lo is ptr; loDt.size=%d toDt.size=%d lo.vn.size=%d",
+            //  (int)loDt->getSize(), (int)toDt->getSize(), (int)lo->getSize());
 
       if (dtSamePtrBaseIgnoreSize(toDt, loDt)) {
-        SEGDBG("CASTCHK: RETURN true (int->ptr glue, lo already same ptr base)");
+        // SEGDBG("CASTCHK: RETURN true (int->ptr glue, lo already same ptr base)");
         return true;
       }
 
       // As a weaker fallback, if both are pointers and the pointer width matches,
       // treat it as redundant (your "ignore near vs far" preference).
       if (loDt->getSize() == toDt->getSize()) {
-        SEGDBG("CASTCHK: RETURN true (int->ptr glue, lo ptr same size)");
+        // SEGDBG("CASTCHK: RETURN true (int->ptr glue, lo ptr same size)");
         return true;
       }
     }
 
-    SEGDBG("CASTCHK: RETURN false (int->ptr glue, lo not compatible; keep cast)");
+    // SEGDBG("CASTCHK: RETURN false (int->ptr glue, lo not compatible; keep cast)");
     return false;
   }
 
@@ -832,13 +832,13 @@ bool PrintC::shouldElideTypeCast(const PcodeOp *op, Datatype *toDt) const
     const Datatype *fromBase = fromP->getPtrTo();
 
     if (toDt->getSize() == fromDt->getSize() && dtSameShallow(toBase, fromBase)) {
-      SEGDBG("CASTCHK: RETURN true (ptr->ptr same base)");
+      // SEGDBG("CASTCHK: RETURN true (ptr->ptr same base)");
       return true;
     }
 
     // Your "ignore near vs far" preference, but only when both are pointers.
     if (toDt->getSize() == fromDt->getSize()) {
-      SEGDBG("CASTCHK: RETURN true (ptr->ptr same size)");
+      // SEGDBG("CASTCHK: RETURN true (ptr->ptr same size)");
       return true;
     }
   }
@@ -849,7 +849,7 @@ bool PrintC::shouldElideTypeCast(const PcodeOp *op, Datatype *toDt) const
     if (d && d->code() == CPUI_CAST && d->getOut()) {
       Datatype *innerTo = d->getOut()->getHighTypeDefFacing();
       if (innerTo && dtSameShallow(toDt, innerTo)) {
-        SEGDBG("CASTCHK: RETURN true (nested identical cast)");
+        // SEGDBG("CASTCHK: RETURN true (nested identical cast)");
         return true;
       }
     }
@@ -864,11 +864,11 @@ bool PrintC::shouldElideTypeCast(const PcodeOp *op, Datatype *toDt) const
       if (lo) {
         const Datatype *loDt = vnReadFacingType(lo, op);
         if (loDt && isPtrType(toDt) && isPtrType(loDt) && dtSamePtrBaseIgnoreSize(toDt, loDt)) {
-          SEGDBG("CASTCHK: RETURN true (dropHi PIECE, lo same ptr base)");
+          // SEGDBG("CASTCHK: RETURN true (dropHi PIECE, lo same ptr base)");
           return true;
         }
         if (isPtrType(toDt) && loDt && isPtrType(loDt) && toDt->getSize() == loDt->getSize()) {
-          SEGDBG("CASTCHK: RETURN true (dropHi PIECE, lo ptr same size)");
+          // SEGDBG("CASTCHK: RETURN true (dropHi PIECE, lo ptr same size)");
           return true;
         }
       }
@@ -877,11 +877,11 @@ bool PrintC::shouldElideTypeCast(const PcodeOp *op, Datatype *toDt) const
 
   // 6) Catch (RECT*)&rc when rc is already the right type
   if (vnIsAddressOfLocalOfType(in, op, toDt)) {
-    SEGDBG("CASTCHK: RETURN true (addr-of local already matches)");
+    // SEGDBG("CASTCHK: RETURN true (addr-of local already matches)");
     return true;
   }
 
-  SEGDBG("CASTCHK: RETURN false (no rule matched)");
+  // SEGDBG("CASTCHK: RETURN false (no rule matched)");
   return false;
 }
 
@@ -2210,11 +2210,14 @@ bool PrintC::printCharacterConstant(ostream &s,const Address &addr,Datatype *cha
     int4 printable = 0;
     int4 total = (int4)buffer.size();
     bool hasTerminator = false;
+    int4 terminatorPos = -1;
+
     for (int4 i = 0; i < total; ++i) {
       uint1 c = buffer[i];
       if (c == 0) {
         // Terminator is fine and does not count against "textiness".
         hasTerminator = true;
+        if (terminatorPos < 0) terminatorPos = i;
         continue;
       }
       if ((c >= 0x20 && c <= 0x7e) || c == '\t' || c == '\n' || c == '\r') {
@@ -2402,8 +2405,41 @@ bool PrintC::pushPtrCharConstant(uintb val,const TypePointer *ct,const Varnode *
     point = op->getAddr();
   Address stringaddr = glb->resolveConstant(spc,val,ct->getSize(),point,fullEncoding);
   if (stringaddr.isInvalid()) return false;
-  if (!glb->symboltab->getGlobalScope()->isReadOnly(stringaddr,1,Address()))
-    return false;	     // Check that string location is readonly
+
+  SEGDBG("pushPtrCharConstant: 0x%llx stringAddr: 0x%llx", point.getOffset(), stringaddr.getOffset());
+
+  // Upstream Ghidra only emits a quoted literal for pointers into read-only memory.
+  // For Win16/segmented binaries, format strings and other "literals" frequently live
+  // in a normal data segment that isn't marked read-only. If the symbol at the target
+  // address looks like a Ghidra string label ("s_" / "str_"), allow literal emission
+  // even when the memory isn't flagged read-only. Otherwise keep the read-only gate
+  // to avoid turning indexed byte tables into noisy escaped literals.
+  bool allowNonReadonly = false;
+  if (glb->symboltab != (Database *)0) {
+    Scope *gscope = glb->symboltab->getGlobalScope();
+    Scope *scope = glb->symboltab->mapScope(gscope, stringaddr, point);
+    if (scope == (Scope *)0)
+      scope = gscope;
+
+    SymbolEntry *entry = scope->findAddr(stringaddr, point);
+    if (entry != (SymbolEntry *)0) {
+      Symbol *sym = entry->getSymbol();
+      if (sym != (Symbol *)0) {
+        const string &nm = sym->getName();
+        if ((nm.size() >= 2 && nm[0] == 's' && nm[1] == '_') ||
+            (nm.size() >= 4 && nm[0] == 's' && nm[1] == 't' && nm[2] == 'r' && nm[3] == '_')) {
+          allowNonReadonly = true;
+        }
+      }
+    }
+  }
+
+  if (!allowNonReadonly) {
+    if (glb->symboltab == (Database *)0)
+      return false;
+    if (!glb->symboltab->getGlobalScope()->isReadOnly(stringaddr,1,Address()))
+      return false;         // Check that string location is readonly
+  }
 
   ostringstream str;
   Datatype *subct = ct->getPtrTo();
@@ -2413,6 +2449,7 @@ bool PrintC::pushPtrCharConstant(uintb val,const TypePointer *ct,const Varnode *
   pushAtom(Atom(str.str(),vartoken,EmitMarkup::const_color,op,vn));
   return true;
 }
+
 
 /// \brief Attempt to push a function name representing a constant pointer onto the RPN stack
 ///
@@ -2437,101 +2474,232 @@ bool PrintC::pushPtrCodeConstant(uintb val,const TypePointer *ct,
   return false;
 }
 
-void PrintC::pushConstant(uintb val,const Datatype *ct,tagtype tag,
-			    const Varnode *vn,
-			    const PcodeOp *op)
+void PrintC::pushConstant(uintb val, const Datatype *ct, tagtype tag,
+                          const Varnode *vn, const PcodeOp *op)
 {
   Datatype *subtype;
-  switch(ct->getMetatype()) {
+
+  SEGDBG("pushConstant: %lld 0x%0llx", (long long)val,
+         (op != (const PcodeOp *)0) ? (unsigned long long)op->getAddr().getOffset() : 0ULL);
+
+  auto tryScalarStringLiteral = [&](bool /*signedVal*/) -> bool {
+    AddrSpace *spc = glb->getDefaultDataSpace();
+    SegmentOp *segop = glb->getSegmentOp(spc);
+    if (segop == nullptr || glb->symboltab == (Database *)0)
+      return false;
+
+    if (ct->getSize() != 4)
+      return false;
+
+    Address point;
+    if (op != (const PcodeOp *)0)
+      point = op->getAddr();
+
+    uintb fullEncoding = 0;
+    Address stringaddr = glb->resolveConstant(spc, val, ct->getSize(), point, fullEncoding);
+    if (stringaddr.isInvalid())
+      return false;
+
+    Scope *gscope = glb->symboltab->getGlobalScope();
+    Scope *scope = glb->symboltab->mapScope(gscope, stringaddr, point);
+    if (scope == (Scope *)0)
+      scope = gscope;
+
+    SymbolEntry *entry = scope->findAddr(stringaddr, point);
+    if (entry == (SymbolEntry *)0)
+      return false;
+
+    Symbol *sym = entry->getSymbol();
+    if (sym == (Symbol *)0)
+      return false;
+
+    const string &nm = sym->getName();
+    bool symLooksLikeString =
+        (nm.size() >= 2 && nm[0] == 's' && nm[1] == '_') ||
+        (nm.size() >= 4 && nm[0] == 's' && nm[1] == 't' && nm[2] == 'r' && nm[3] == '_');
+    if (!symLooksLikeString)
+      return false;
+
+    Datatype *charType = glb->types->getBase(1, TYPE_INT);
+
+    ostringstream str;
+    if (!printCharacterConstant(str, stringaddr, charType))
+      return false;
+
+    pushAtom(Atom(str.str(), vartoken, EmitMarkup::const_color, op, vn));
+    return true;
+  };
+
+  auto trySymbolizeResolvedAddress = [&](const Address &addr) -> bool {
+    if (glb->symboltab == (Database *)0)
+      return false;
+
+    Address point;
+    if (op != (const PcodeOp *)0)
+      point = op->getAddr();
+
+    Scope *gscope = glb->symboltab->getGlobalScope();
+    Scope *scope = glb->symboltab->mapScope(gscope, addr, point);
+    if (scope == (Scope *)0)
+      scope = gscope;
+
+    SymbolEntry *entry = scope->findAddr(addr, point);
+    if (entry == (SymbolEntry *)0)
+      return false;
+
+    Symbol *sym = entry->getSymbol();
+    if (sym == (Symbol *)0)
+      return false;
+
+    if (sym->getCategory() == Symbol::equate)
+      return false;
+
+    // Avoid auto-generated labels (prevents LAB_0000_ffff etc)
+    {
+      const string &nm = sym->getName();
+      if (nm.size() >= 4 && nm[0] == 'L' && nm[1] == 'A' && nm[2] == 'B' && nm[3] == '_')
+        return false;
+      if (nm.size() >= 4 && nm[0] == 'U' && nm[1] == 'N' && nm[2] == 'K' && nm[3] == '_')
+        return false;
+    }
+
+    pushSymbol(sym, vn, op);
+    return true;
+  };
+
+  auto trySymbolizeScalarAddress = [&]() -> bool {
+    if (glb->symboltab == (Database *)0)
+      return false;
+
+    // HARD GUARD: never symbolize literal 0 as a symbol (DS:0000 often has labels)
+    if (val == 0)
+      return false;
+
+    AddrSpace *spc = glb->getDefaultDataSpace();
+    SegmentOp *segop = glb->getSegmentOp(spc);
+    if (segop == nullptr)
+      return false;
+
+    if (ct->getSize() < 4)
+      return false;
+
+    // Avoid symbolizing small immediates/masks (0x0000ffff etc)
+    if (val < 0x10000ULL)
+      return false;
+
+    Address point;
+    if (op != (const PcodeOp *)0)
+      point = op->getAddr();
+
+    uintb fullEncoding = 0;
+    Address addr = glb->resolveConstant(spc, val, ct->getSize(), point, fullEncoding);
+    if (addr.isInvalid())
+      return false;
+
+    return trySymbolizeResolvedAddress(addr);
+  };
+
+  auto trySymbolizePointerConstant = [&]() -> bool {
+    if (glb->symboltab == (Database *)0)
+      return false;
+
+    // HARD GUARD: never symbolize a null pointer constant
+    if (val == 0)
+      return false;
+
+    AddrSpace *spc = glb->getDefaultDataSpace();
+    SegmentOp *segop = glb->getSegmentOp(spc);
+    if (segop == nullptr)
+      return false;
+
+    Address point;
+    if (op != (const PcodeOp *)0)
+      point = op->getAddr();
+
+    uintb fullEncoding = 0;
+    Address addr = glb->resolveConstant(spc, val, ct->getSize(), point, fullEncoding);
+    if (addr.isInvalid())
+      return false;
+
+    return trySymbolizeResolvedAddress(addr);
+  };
+
+  switch (ct->getMetatype()) {
   case TYPE_UINT:
-    if (ct->isCharPrint())
-      pushCharConstant(val,(TypeChar *)ct,tag,vn,op);
-    else if (ct->isEnumType())
-      pushEnumConstant(val,(TypeEnum *)ct,tag,vn,op);
-    else
-      push_integer(val,ct->getSize(),false,tag,vn,op);
+    if (ct->isCharPrint()) {
+      pushCharConstant(val, (TypeChar *)ct, tag, vn, op);
+      return;
+    }
+    if (ct->isEnumType()) {
+      pushEnumConstant(val, (TypeEnum *)ct, tag, vn, op);
+      return;
+    }
+    if (tryScalarStringLiteral(false))
+      return;
+    if (trySymbolizeScalarAddress())
+      return;
+    push_integer(val, ct->getSize(), false, tag, vn, op);
     return;
+
   case TYPE_INT:
-    if (ct->isCharPrint())
-      pushCharConstant(val,(TypeChar *)ct,tag,vn,op);
-    else if (ct->isEnumType())
-      pushEnumConstant(val,(TypeEnum *)ct,tag,vn,op);
-    else
-      push_integer(val,ct->getSize(),true,tag,vn,op);
+    if (ct->isCharPrint()) {
+      pushCharConstant(val, (TypeChar *)ct, tag, vn, op);
+      return;
+    }
+    if (ct->isEnumType()) {
+      pushEnumConstant(val, (TypeEnum *)ct, tag, vn, op);
+      return;
+    }
+    if (tryScalarStringLiteral(true))
+      return;
+    if (trySymbolizeScalarAddress())
+      return;
+    push_integer(val, ct->getSize(), true, tag, vn, op);
     return;
+
   case TYPE_UNKNOWN:
-    push_integer(val,ct->getSize(),false,tag,vn,op);
+    if (trySymbolizeScalarAddress())
+      return;
+    push_integer(val, ct->getSize(), false, tag, vn, op);
     return;
+
   case TYPE_BOOL:
-    pushBoolConstant(val,(const TypeBase *)ct,tag,vn,op);
+    pushBoolConstant(val, (const TypeBase *)ct, tag, vn, op);
     return;
+
   case TYPE_VOID:
     clear();
     throw LowlevelError("Cannot have a constant of type void");
+
   case TYPE_PTR:
   case TYPE_PTRREL:
-    if (option_NULL&&(val==0)) { // A null pointer
-      pushAtom(Atom(nullToken,vartoken,EmitMarkup::var_color,op,vn));
+    // HARD GUARD: null pointers must stay null/0, never become DS:0000 symbols.
+    if (val == 0) {
+      if (option_NULL) {
+        pushAtom(Atom(nullToken, vartoken, EmitMarkup::var_color, op, vn));
+      } else {
+        // Print 0 as a numeric constant; casts (if any) come from the caller context.
+        push_integer(0, ct->getSize(), false, tag, vn, op);
+      }
       return;
     }
+
     subtype = ((TypePointer *)ct)->getPtrTo();
+
     if (subtype->isCharPrint()) {
-      if (pushPtrCharConstant(val,(const TypePointer *)ct,vn,op))
-	return;
+      if (pushPtrCharConstant(val, (const TypePointer *)ct, vn, op))
+        return;
+      if (trySymbolizePointerConstant())
+        return;
+    } else if (subtype->getMetatype() == TYPE_CODE) {
+      if (pushPtrCodeConstant(val, (const TypePointer *)ct, vn, op))
+        return;
+      if (trySymbolizePointerConstant())
+        return;
+    } else {
+      if (trySymbolizePointerConstant())
+        return;
     }
-    else if (subtype->getMetatype()==TYPE_CODE) {
-      if (pushPtrCodeConstant(val,(const TypePointer *)ct,vn,op))
-	return;
-    }
-
-    // Never symbolize a null pointer constant. Even if DS:0000 has a label,
-    // comparisons against 0 should stay as 0 for readability.
-    if (val == 0) {
-      break;   // fall through to default printing (numeric 0)
-    }
-
-    // If the pointer doesn't look like a printable string or function pointer,
-    // still try to render it as a named symbol (e.g. CS: byte tables) instead
-    // of a raw numeric address.
-    {
-      AddrSpace *spc = glb->getDefaultDataSpace();
-      uintb fullEncoding = 0;
-      Address point;
-      if (op != (const PcodeOp *)0)
-        point = op->getAddr();
-
-      // Use near-pointer size for segmented architectures (Win16),
-      // so DS/CS resolve-list logic is exercised instead of forcing FAR resolution.
-      SegmentOp *segop = glb->getSegmentOp(spc);
-      int4 innersz = (segop != nullptr) ? segop->getInnerSize() : ct->getSize();
-
-      Address addr = glb->resolveConstant(spc, val, innersz, point, fullEncoding);
-      if (!addr.isInvalid() && glb->symboltab != (Database *)0) {
-        Scope *gscope = glb->symboltab->getGlobalScope();
-        Scope *scope = glb->symboltab->mapScope(gscope, addr, point);
-        if (scope == (Scope *)0)
-          scope = gscope;
-
-        SymbolEntry *entry = scope->findAddr(addr, point);
-        if (entry != (SymbolEntry *)0) {
-          Symbol *sym = entry->getSymbol();
-          if (sym != (Symbol *)0) {
-
-            int2 cat = sym->getCategory();
-            if (cat != Symbol::equate &&
-                cat != Symbol::function_parameter &&
-                cat != Symbol::fake_input &&
-                sym->getMapEntry(addr) != (SymbolEntry *)0 &&
-                !sym->isNameUndefined()) {
-
-              pushSymbol(sym, vn, op);
-              return;
-            }
-          }
-        }
-      }
-    }
-
     break;
   case TYPE_FLOAT:
     push_float(val,ct->getSize(),tag,vn,op);
@@ -2548,6 +2716,7 @@ void PrintC::pushConstant(uintb val,const Datatype *ct,tagtype tag,
   case TYPE_PARTIALUNION:
     break;
   }
+
   // Default printing
   if (!option_nocasts) {
     pushOp(&typecast,op);
@@ -2661,7 +2830,45 @@ void PrintC::pushSymbol(const Symbol *sym,const Varnode *vn,const PcodeOp *op)
     tokenColor = EmitMarkup::const_color;
   else
     tokenColor = EmitMarkup::var_color;
+
+  // --- HACK: If this symbol is a Ghidra default string label (s_ / str_),
+  // try to print it as a C string literal instead of as a symbol name.
+  //
+  // This is specifically to handle Win16-style segmented pointers where the
+  // decompiler ends up emitting the symbol token (e.g. s_s_map_1120_1633)
+  // rather than routing through the normal ptr->string literal path.
+  //
+  // We keep this narrowly scoped (only s_*/str_*) to avoid lookup tables like
+  // STRINGS::rgSTRLookupTable turning into giant literals.
+  if (sym != (const Symbol *)0) {
+    const string &nm = sym->getName();
+    bool symLooksLikeString =
+        (nm.size() >= 2 && nm[0] == 's' && nm[1] == '_') ||
+        (nm.size() >= 4 && nm[0] == 's' && nm[1] == 't' && nm[2] == 'r' && nm[3] == '_');
+
+    if (symLooksLikeString) {
+      // Get an address for the symbol and try to recover/print the bytes as a string.
+      // printCharacterConstant() will still reject non-text or non-terminated data.
+      SymbolEntry *entry = sym->getFirstWholeMap();
+      if (entry != (SymbolEntry *)0) {
+        Address addr = entry->getAddr();
+
+        // If you want to be extra conservative, you can require default data space:
+        // if (addr.getSpace() == glb->getDefaultDataSpace()) { ... }
+        Datatype *charType = glb->types->getBase(1, TYPE_INT);
+
+        ostringstream ss;
+        if (printCharacterConstant(ss, addr, charType)) {
+          pushAtom(Atom(ss.str(), vartoken, EmitMarkup::const_color, op, vn));
+          return;
+        }
+      }
+    }
+  }
+  // --- end HACK
+
   pushSymbolScope(sym);
+
   if (sym->hasMergeProblems() && vn != (Varnode *)0) {
     HighVariable *high = vn->getHigh();
     if (high->isUnmerged()) {
